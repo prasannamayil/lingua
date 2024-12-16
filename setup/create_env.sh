@@ -1,18 +1,18 @@
-#!/bin/bash
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# #!/bin/bash
+# # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-#SBATCH --job-name=env_creation
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --gres=gpu:8
-#SBATCH --exclusive
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem=0
-#SBATCH --time=01:00:00
+# #SBATCH --job-name=env_creation
+# #SBATCH --nodes=1
+# #SBATCH --ntasks=1
+# #SBATCH --gres=gpu:8
+# #SBATCH --exclusive
+# #SBATCH --ntasks-per-node=1
+# #SBATCH --cpus-per-task=128
+# #SBATCH --mem=0
+# #SBATCH --time=01:00:00
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+# # Exit immediately if a command exits with a non-zero status
+# set -e
 
 # Start timer
 start_time=$(date +%s)
@@ -25,9 +25,12 @@ env_prefix=lingua_$current_date
 
 # Create the conda environment
 
-source $CONDA_ROOT/etc/profile.d/conda.sh
-conda create -n $env_prefix python=3.11 -y -c anaconda
-conda activate $env_prefix
+# source $CONDA_ROOT/etc/profile.d/conda.sh
+# conda create -n $env_prefix python=3.11 -y -c anaconda
+# conda activate $env_prefix
+
+python3 -m venv ~/.$env_prefix
+source ~/.$env_prefix/bin/activate
 
 echo "Currently in env $(which python)"
 
