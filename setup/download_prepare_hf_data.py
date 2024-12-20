@@ -6,6 +6,8 @@ import time
 import subprocess
 import requests
 from huggingface_hub import snapshot_download
+import glob
+import random
 
 def run_command(command):
     print(f"Running: {command}")
@@ -86,7 +88,7 @@ def setup_terashuf(work_dir):
     return terashuf_dir
 
 
-def main(dataset, memory, data_dir, seed=42, nchunks=32):
+def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     # Configuration
     repo_id = {
         "fineweb_edu": "HuggingFaceFW/fineweb-edu",
@@ -167,6 +169,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         # Download and process in tmp directory
         terashuf_dir = setup_terashuf(work_dir)
         download_dataset(repo_id, tmp_src_dir, allow_patterns)
+        run_command(f"cp -r {tmp_src_dir} {final_src_dir}")
 
         if "fineweb" in dataset:
             parquet_to_jsonl(dataset, work_dir, tmp_src_dir, tmp_src_dir)
@@ -176,17 +179,62 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         os.environ["SEED"] = f"{seed}"
 
         terashuf_executable = os.path.join(terashuf_dir, "terashuf")
-        run_command(
-            f"ulimit -n 100000 && "
-            f"find {tmp_src_dir} -type f -name '*{orig_extension}' -print0 | xargs -0 {cat_command} | {terashuf_executable} | "
-            f"split -n r/{nchunks} -d --suffix-length 2 --additional-suffix {suffix} - {tmp_out_dir}/{prefix}"
-        )
 
-        # Move final results to destination
-        print(f"Moving processed data to {final_out_dir}")
-        if os.path.exists(final_out_dir):
-            run_command(f"rm -rf {final_out_dir}")
-        run_command(f"mv {tmp_out_dir} {final_out_dir}")
+        # Process in batches of files instead of all at once
+        def process_files_in_batches(src_dir, batch_size=batch_size):
+            if dataset == "c4":
+                train_files = glob.glob(f"{src_dir}/en/c4-train.*{orig_extension}", recursive=True)
+                val_files = glob.glob(f"{src_dir}/en/c4-validation.*{orig_extension}", recursive=True)
+                print(f"Found {len(train_files)} training files and {len(val_files)} validation files")
+            else:
+                train_files = glob.glob(f"{src_dir}/**/*{orig_extension}", recursive=True)
+                print(f"Found {len(train_files)} files")
+            
+            # Clean directories and ensure they exist
+            run_command(f"rm -rf {tmp_out_dir} {final_out_dir}")
+            os.makedirs(tmp_out_dir, exist_ok=True)  # Explicitly create tmp directory
+            os.makedirs(final_out_dir, exist_ok=True)
+            
+            # Process files in batches
+            random.shuffle(train_files)
+            chunks_per_batch = max(1, nchunks)
+            
+            for i in range(0, len(train_files), batch_size):
+                batch = train_files[i:i + batch_size]
+                print(f"Processing batch {i//batch_size + 1}/{(len(train_files) + batch_size - 1)//batch_size}")
+
+                # Set explicit memory limit for terashuf (slightly less than available)
+                memory_gb = max(1, memory - 1)  # Leave 1GB buffer
+                os.environ["MEMORY"] = str(memory_gb)
+        
+                run_command(
+                    f"ulimit -n 100000 && "
+                    f"{cat_command} {' '.join(batch)} | "
+                    f"MEMORY={memory_gb} {terashuf_executable} | "
+                    f"split -n r/{chunks_per_batch} -d --suffix-length 2 --additional-suffix {suffix}.tmp - {tmp_out_dir}/{prefix} && "
+                    f"for f in {tmp_out_dir}/*tmp; do cat \"$f\" >> \"${{f%.tmp}}\" && rm \"$f\"; done"
+                )
+                    
+            # Handle validation data
+            if dataset == "c4" and val_files:
+                print("Processing validation files...")
+                random.shuffle(val_files)
+                run_command(
+                    f"ulimit -n 100000 && "
+                    f"{cat_command} {' '.join(val_files)} | {terashuf_executable} > {tmp_out_dir}/{dataset}.val{suffix}"
+                )
+            elif dataset != "c4":
+                # Create validation set from chunks for other datasets
+                for i in range(nchunks):
+                    run_command(
+                        f"head -n {k_validation} {tmp_out_dir}/{prefix}{i:02d}{suffix} >> {tmp_out_dir}/{dataset}.val{suffix} && "
+                        f"sed -i '1,{k_validation}d' {tmp_out_dir}/{prefix}{i:02d}{suffix}"
+                    )
+            
+            # Move to final directory
+            run_command(f"cp {tmp_out_dir}/* {final_out_dir}")
+
+        process_files_in_batches(tmp_src_dir)
 
     finally:
         # Cleanup
@@ -205,7 +253,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--nchunks", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=5)
 
     args = parser.parse_args()
 
-    main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks)
+    main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks, args.batch_size)
