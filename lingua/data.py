@@ -23,7 +23,7 @@ This file contains all code necessary for text data loading from preshuffled jso
 For example if given the following files with a world size of 8 
 
 /path/to/arxiv:
-arxiv.chunk.00.jsonl (Contains many lines of {"text":...} or {"content":...})
+arxiv.chunk.00.jsonl (Contains many linfes of {"text":...} or {"content":...})
 arxiv.chunk.01.jsonl
 arxiv.chunk.02.jsonl
 arxiv.chunk.03.jsonl
@@ -170,7 +170,7 @@ def read_jsonl(
         offset=offset,
         current_iter=current_iter,
     )
-    with open(file_path, "r") as file:
+    with open(file_path, "r", encoding="utf-8") as file:
         file.seek(position)
         while line := file.readline():
             current_line += 1
