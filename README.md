@@ -30,6 +30,10 @@ This command will download the `fineweb_edu` and prepare it for training in the 
 ```bash
 python setup/download_prepare_hf_data.py fineweb_edu <MEMORY> --data_dir ./data --seed 42 --nchunks <NCHUNKS>
 ```
+```bash
+    python setup/download_prepare_hf_data.py c4 8 --data_dir /is/cluster/fast/smallick/datasets/ --seed 42 --nchunks 8
+```
+
 to download tokenizer (here llama3), use the folowing script:
 ```bash
 python setup/download_tokenizer.py llama3 <SAVE_PATH> --api_key <HUGGINGFACE_TOKEN>
@@ -259,6 +263,18 @@ python -m lingua.stool config=apps/main/configs/debug.yaml nodes=2 launcher=bash
 Notice that we added **`launcher=bash`** which basically means that the generated `submit.slurm` will simply be executed instead of submitting it through `sbatch`. The `submit.slurm` has an `srun` command also so this is very similar to the above `srun` command. We also add **`dirs_exists_ok=true`** to tell `stool` that it is okay to override things in an existing folder (code, config, etc)
 
 If you want to use `pdb` to step through your code, you should use `-n 1` to run only on 1 GPU. 
+
+### Launching jobs with `torchrun` (condor)
+First start a tmux session and submit an interactive job
+```bash
+tmux new -s run
+condor_submit_bid 100 h100_fullnode.sub -i
+```
+Then simply run one of the bash files with appropriate arguments
+```bash
+bash run_mamba.sh 8 mamba_7b.yaml # arg1 is number of GPUs, arg2 is config file
+```
+
 
 ## Evaluations
 
