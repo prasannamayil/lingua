@@ -8,26 +8,57 @@ import requests
 from huggingface_hub import snapshot_download
 import glob
 import random
+import multiprocessing
+from functools import partial
 
 def run_command(command):
     print(f"Running: {command}")
     subprocess.run(command, shell=True, check=True)
 
 
+def download_file(url, local_dir):
+    try:
+        url = url.strip()
+        if not url:
+            return
+            
+        # Extract the relative path from the URL
+        rel_path = url.replace('https://data.together.xyz/redpajama-data-1T/v1.0.0/', '')
+        output_path = os.path.join(local_dir, rel_path)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Download file with wget
+        if not os.path.exists(output_path):
+            print(f"Downloading: {url}")
+            run_command(f"wget -q --show-progress {url} -O {output_path}")
+        else:
+            print(f"File already exists, skipping: {output_path}")
+            
+    except Exception as e:
+        print(f"Error downloading {url}: {str(e)}")
+        return url
+    return None
+
+
 def download_dataset(repo_id, local_dir, allow_patterns):
     print(f"Downloading dataset from {repo_id}...")
+    print(f"Looking for files matching patterns: {allow_patterns}")
     max_retries = 5
     retry_delay = 10  # seconds
     
-    # Add token handling
     token = os.getenv("HF_TOKEN")
     if token is None:
         print("Warning: HF_TOKEN not found in environment. Some datasets might be inaccessible.")
         print("Please run: export HF_TOKEN=your_huggingface_token")
+    else:
+        print("HF_TOKEN found in environment")
     
     for attempt in range(max_retries):
         try:
-            snapshot_download(
+            # Add verbose logging
+            result = snapshot_download(
                 repo_id,
                 repo_type="dataset",
                 local_dir=local_dir,
@@ -38,10 +69,11 @@ def download_dataset(repo_id, local_dir, allow_patterns):
                 tqdm_class=None,
                 revision="main",
             )
+            print(f"Download result path: {result}")
             break
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+        except Exception as e:
+            print(f"Detailed error: {str(e)}")
             if attempt < max_retries - 1:
-                print(f"Error occurred: {e}")
                 print(f"Attempt {attempt + 1} of {max_retries}. Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
@@ -88,11 +120,59 @@ def setup_terashuf(work_dir):
     return terashuf_dir
 
 
-def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
+def download_redpajama(local_dir, num_processes=32):
+    print("Downloading RedPajama dataset using direct download method...")
+    urls_file = os.path.join(local_dir, "urls.txt")
+    failed_urls_file = os.path.join(local_dir, "failed_urls.txt")
+    
+    # Download the urls file
+    urls_url = 'https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt'
+    print(f"Downloading urls file from: {urls_url}")
+    
+    try:
+        response = requests.get(urls_url)
+        response.raise_for_status()
+        
+        # Save urls file
+        os.makedirs(local_dir, exist_ok=True)
+        with open(urls_file, 'w') as f:
+            f.write(response.text)
+        
+        # Read URLs
+        with open(urls_file, 'r') as f:
+            urls = [url.strip() for url in f.readlines() if url.strip()]
+        
+        print(f"Starting parallel download with {num_processes} processes...")
+        
+        # Create a pool of workers
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            # Use partial to fix the local_dir parameter
+            download_func = partial(download_file, local_dir=local_dir)
+            
+            # Map the download function to URLs and collect failed URLs
+            failed_urls = list(filter(None, pool.map(download_func, urls)))
+            
+        # Report and save any failures
+        if failed_urls:
+            print(f"\nFailed to download {len(failed_urls)} files. Saving to {failed_urls_file}")
+            with open(failed_urls_file, 'w') as f:
+                for url in failed_urls:
+                    f.write(f"{url}\n")
+            print(f"To retry failed downloads later, run: while read url; do wget $url; done < {failed_urls_file}")
+            raise Exception(f"Failed to download {len(failed_urls)} files. See {failed_urls_file} for details.")
+        
+        print("All downloads completed successfully!")
+                
+    except Exception as e:
+        raise Exception(f"Failed to download RedPajama dataset: {str(e)}")
+
+
+def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_processes=32):
     # Configuration
     repo_id = {
         "fineweb_edu": "HuggingFaceFW/fineweb-edu",
         "fineweb_edu_10bt": "HuggingFaceFW/fineweb-edu",
+        "fineweb_edu_100bt": "HuggingFaceFW/fineweb-edu",
         "dclm_baseline_1.0": "mlfoundations/dclm-baseline-1.0",
         "dclm_baseline_1.0_10prct": "mlfoundations/dclm-baseline-1.0",
         "pile": "EleutherAI/pile",
@@ -123,6 +203,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     orig_extension = {
         "fineweb_edu": ".jsonl",
         "fineweb_edu_10bt": ".jsonl",
+        "fineweb_edu_100bt": ".jsonl",
         "dclm_baseline_1.0": ".jsonl.zst",
         "dclm_baseline_1.0_10prct": ".jsonl.zst",
         "pile": ".jsonl.zst",
@@ -137,6 +218,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     cat_command = {
         "fineweb_edu": "cat",
         "fineweb_edu_10bt": "cat",
+        "fineweb_edu_100bt": "cat",
         "dclm_baseline_1.0": "zstdcat",
         "dclm_baseline_1.0_10prct": "zstdcat",
         "pile": "zstdcat",  
@@ -151,13 +233,22 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     allow_patterns = {
         "fineweb_edu": None,
         "fineweb_edu_10bt": "sample/10BT/*",
+        "fineweb_edu_100bt": "sample/100BT/*",
         "dclm_baseline_1.0": "*.jsonl.zst",
         "dclm_baseline_1.0_10prct": "global-shard_01_of_10/*.jsonl.zst",
         "pile": "*.jsonl.zst",
         "pile_deduplicated": "*.jsonl.zst",
         "pile_uc": "*.jsonl.zst",
         "c4": "en/*.json.gz",
-        "redpajama": "*.jsonl",
+        "redpajama": [
+            "arxiv/*.jsonl",
+            "book/*.jsonl", 
+            "c4/*.jsonl", 
+            "cc/*.jsonl",
+            "github/*.jsonl", 
+            "stackexchange/*.jsonl", 
+            "wikipedia/*.jsonl"
+        ],
         "refineweb": "*.jsonl",
         "slimpajama": "*.jsonl"
     }[dataset]
@@ -168,7 +259,13 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     try:
         # Download and process in tmp directory
         terashuf_dir = setup_terashuf(work_dir)
-        download_dataset(repo_id, tmp_src_dir, allow_patterns)
+        
+        # Special case for RedPajama
+        if dataset == "redpajama":
+            download_redpajama(tmp_src_dir, num_processes)
+        else:
+            download_dataset(repo_id, tmp_src_dir, allow_patterns)
+            
         run_command(f"cp -r {tmp_src_dir} {final_src_dir}")
 
         if "fineweb" in dataset:
@@ -239,6 +336,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5):
     finally:
         # Cleanup
         print("Cleaning up temporary directories...")
+        # Commented out to preserve files for debugging if needed
         # run_command(f"rm -rf {tmp_src_dir}")
         # if os.path.exists(tmp_out_dir):
         #     run_command(f"rm -rf {tmp_out_dir}")
@@ -254,7 +352,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--nchunks", type=int, default=32)
     parser.add_argument("--batch_size", type=int, default=5)
+    parser.add_argument("--num_processes", type=int, default=32)
 
     args = parser.parse_args()
 
-    main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks, args.batch_size)
+    main(args.dataset, args.memory, args.data_dir, args.seed, args.nchunks, 
+         args.batch_size, args.num_processes)
