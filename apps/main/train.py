@@ -308,7 +308,12 @@ def train(args: TrainArgs):
         )
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
-        checkpoint.load(model, optimizer, train_state, world_mesh)
+        try:
+            checkpoint.load(model, optimizer, train_state, world_mesh)
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {e}")
+            torch.distributed.barrier()  # Ensure all processes are synchronized
+
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
             if get_is_master():
@@ -528,13 +533,17 @@ def train(args: TrainArgs):
             if every_n_steps(
                 train_state, args.checkpoint.dump.every, acc_step=0
             ) or every_n_steps(train_state, args.checkpoint.eval.every, acc_step=0):
-                saved = checkpoint.save(
-                    model,
-                    optimizer,
-                    train_state,
-                    args,
-                    device_mesh=world_mesh,
-                )
+                try:
+                    saved = checkpoint.save(
+                        model,
+                        optimizer,
+                        train_state,
+                        args,
+                        device_mesh=world_mesh,
+                    )
+                except Exception as e:
+                    logger.error(f"Error during checkpoint save: {e}")
+                    torch.distributed.barrier()  # Ensure all processes are synchronized
 
             if args.eval is not None and every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
@@ -577,24 +586,29 @@ def train(args: TrainArgs):
 
             if preemption_flag["flag"]:
                 if not saved:
-                    checkpoint.save(
-                        model,
-                        optimizer,
-                        train_state,
-                        args,
-                        device_mesh=world_mesh,
-                    )
-                requeue_slurm_job()
+                    try:
+                        checkpoint.save(
+                            model,
+                            optimizer,
+                            train_state,
+                            args,
+                            device_mesh=world_mesh,
+                        )
+                    except Exception as e:
+                        logger.error(f"Error during preemption checkpoint save: {e}")
                 sys.exit(0)
 
     if not saved:
-        checkpoint.save(
-            model,
-            optimizer,
-            train_state,
-            args,
-            device_mesh=world_mesh,
-        )
+        try:
+            checkpoint.save(
+                model,
+                optimizer,
+                train_state,
+                args,
+                device_mesh=world_mesh,
+            )
+        except Exception as e:
+            logger.error(f"Error during final checkpoint save: {e}")
     gc.collect()
 
 
