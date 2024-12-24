@@ -134,7 +134,8 @@ Here's a quick description of the most important files and features:
 
 ## Configuration
 
-Most components need configuration and we chose to use data classes to represent these configuration objects. `args.py` helps with converting between `config.yaml` and config dictionaries into the respective data classes. 
+Most componen
+ts need configuration and we chose to use data classes to represent these configuration objects. `args.py` helps with converting between `config.yaml` and config dictionaries into the respective data classes. 
 
 So for examples the `TrainArgs` in `apps/main/train.py` has a `LMTransformerArgs`, `OptimArgs`, etc ... as children. 
 
@@ -272,7 +273,7 @@ condor_submit_bid 100 h100_fullnode.sub -i
 ```
 Then simply run one of the bash files with appropriate arguments
 ```bash
-bash run_mamba.sh 8 mamba_7b.yaml # arg1 is number of GPUs, arg2 is config file
+bash run_mamba.sh 8 mamba_7b.yaml API_KEY # arg1 is number of GPUs, arg2 is config file, arg3 is API key
 ```
 
 
