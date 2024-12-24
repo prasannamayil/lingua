@@ -1,0 +1,14 @@
+request_cpus = 64
+#request_gpus = 8
+request_memory = 500000
+use template : FullNode
+request_disk = 300G
+# requirements = (TARGET.CUDACapability >= 7.0) && (TARGET.CUDAGlobalMemoryMb >=40000)
+requirements = (CUDADeviceName == "NVIDIA H100 80GB HBM3")
+log_root = /is/cluster/fast/pmayilvahanan/jobs/$(ClusterId)
+error = $(log_root).err
+output = $(log_root).out
+log = $(log_root).log
+MaxTime = 259200
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+queue
