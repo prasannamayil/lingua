@@ -242,9 +242,8 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
         "c4": "en/*.json.gz",
         "redpajama": [
             "arxiv/*.jsonl",
-            "book/*.jsonl", 
             "c4/*.jsonl", 
-            "cc/*.jsonl",
+            "common_crawl/*.jsonl",
             "github/*.jsonl", 
             "stackexchange/*.jsonl", 
             "wikipedia/*.jsonl"
