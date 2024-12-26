@@ -208,9 +208,9 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
         "dclm_baseline_1.0_10prct": ".jsonl.zst",
         "pile": ".jsonl.zst",
         "pile_deduplicated": ".jsonl.zst",
-        "pile_uc": ".jsonl.zst",  # Add this line
+        "pile_uc": ".jsonl.zst",
         "c4": ".json.gz",
-        "redpajama": ".jsonl",
+        "redpajama": [".jsonl", ".jsonl.zst"],
         "refineweb": ".jsonl",
         "slimpajama": ".jsonl"
     }[dataset]
@@ -221,11 +221,11 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
         "fineweb_edu_100bt": "cat",
         "dclm_baseline_1.0": "zstdcat",
         "dclm_baseline_1.0_10prct": "zstdcat",
-        "pile": "zstdcat",  
+        "pile": "zstdcat",
         "pile_deduplicated": "zstdcat",
         "pile_uc": "zstdcat",
         "c4": "gunzip -c",
-        "redpajama": "cat",
+        "redpajama": {"jsonl": "cat", "jsonl.zst": "zstdcat"},
         "refineweb": "cat",
         "slimpajama": "cat"
     }[dataset]
@@ -283,7 +283,13 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
                 val_files = glob.glob(f"{src_dir}/en/c4-validation.*{orig_extension}", recursive=True)
                 print(f"Found {len(train_files)} training files and {len(val_files)} validation files")
             else:
-                train_files = glob.glob(f"{src_dir}/**/*{orig_extension}", recursive=True)
+                # Handle multiple extensions for RedPajama
+                if isinstance(orig_extension, list):
+                    train_files = []
+                    for ext in orig_extension:
+                        train_files.extend(glob.glob(f"{src_dir}/**/*{ext}", recursive=True))
+                else:
+                    train_files = glob.glob(f"{src_dir}/**/*{orig_extension}", recursive=True)
                 print(f"Found {len(train_files)} files")
             
             # Clean directories and ensure they exist
@@ -299,13 +305,24 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
                 batch = train_files[i:i + batch_size]
                 print(f"Processing batch {i//batch_size + 1}/{(len(train_files) + batch_size - 1)//batch_size}")
 
-                # Set explicit memory limit for terashuf (slightly less than available)
-                memory_gb = max(1, memory - 1)  # Leave 1GB buffer
+                # Set explicit memory limit for terashuf
+                memory_gb = max(1, memory - 1)
                 os.environ["MEMORY"] = str(memory_gb)
         
+                # Handle different cat commands based on file extensions
+                if dataset == "redpajama":
+                    cat_commands = []
+                    for file in batch:
+                        ext = ".jsonl.zst" if file.endswith(".jsonl.zst") else ".jsonl"
+                        cmd = cat_command[ext.lstrip(".")]
+                        cat_commands.append(f"{cmd} '{file}'")
+                    cat_part = " | ".join(cat_commands)
+                else:
+                    cat_part = f"{cat_command} {' '.join(batch)}"
+
                 run_command(
                     f"ulimit -n 100000 && "
-                    f"{cat_command} {' '.join(batch)} | "
+                    f"{cat_part} | "
                     f"MEMORY={memory_gb} {terashuf_executable} | "
                     f"split -n r/{chunks_per_batch} -d --suffix-length 2 --additional-suffix {suffix}.tmp - {tmp_out_dir}/{prefix} && "
                     f"for f in {tmp_out_dir}/*tmp; do cat \"$f\" >> \"${{f%.tmp}}\" && rm \"$f\"; done"
