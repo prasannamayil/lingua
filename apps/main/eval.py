@@ -59,6 +59,7 @@ class LMHarnessArgs:
     numpy_random_seed: int = 1234
     torch_random_seed: int = 1234
     fewshot_random_seed: int = 1234
+    compute_loss: bool = False
 
 @dataclass
 class ValidationArgs:
@@ -112,6 +113,8 @@ class EvalHarnessLM(LM):
         self._rank = get_global_rank()
         self._world_size = get_world_size()
         self.device = generator.device
+        self.losses = defaultdict(list)
+        self.compute_loss = False
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         prompts, gen_args = zip(*[req.args for req in requests])
@@ -138,13 +141,19 @@ class EvalHarnessLM(LM):
         prompts, continuations = zip(*[req.args for req in requests])
         inputs = [req.args[0] + req.args[1] for req in requests]
         max_gen_len = self.generator.max_gen_len
-        # We temporarily lower max gen len
         self.generator.max_gen_len = 1
         _, lls, greedy = self.generator.generate(inputs)
         results = []
-        for p, ll, gr in zip(prompts, lls, greedy):
+        
+        for p, ll, gr, req in zip(prompts, lls, greedy, requests):
             p_len = len(self.generator.tokenizer.encode(p, add_bos=False, add_eos=False))
-            results.append((ll[p_len:].sum().item(), gr[p_len:].all().item()))
+            cont_ll = ll[p_len:].sum().item()
+            cont_tokens = len(ll[p_len:])
+            
+            if self.compute_loss and hasattr(req, 'task_name'):
+                self.losses[req.task_name].append(-cont_ll / cont_tokens)
+                
+            results.append((cont_ll, gr[p_len:].all().item()))
 
         self.generator.max_gen_len = max_gen_len
         return results
@@ -246,7 +255,16 @@ def launch_eval(cfg: EvalArgs):
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)
+    wrap.compute_loss = cfg.harness.compute_loss
+    
     results = simple_evaluate(wrap, **asdict(cfg.harness))
+    
+    if cfg.harness.compute_loss:
+        loss_metrics = {}
+        for task_name, task_losses in wrap.losses.items():
+            loss_metrics[f"{task_name}_loss"] = sum(task_losses) / len(task_losses)
+        results['results'].update(loss_metrics)
+    
     val_results =  None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
