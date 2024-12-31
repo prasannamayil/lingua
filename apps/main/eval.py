@@ -3,6 +3,7 @@
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import torch.distributed as dist
 import json
 import logging
 import os
@@ -209,7 +210,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             metrics['nll_per_char'].append(tmp / len(texts[i]))
 
             metrics['avg_seqlen'].append(len(ll))
-        
+
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
         metrics.update(dist_mean_dict(metrics))
@@ -257,14 +258,18 @@ def launch_eval(cfg: EvalArgs):
     wrap = EvalHarnessLM(generator)
     wrap.compute_loss = cfg.harness.compute_loss
     
-    results = simple_evaluate(wrap, **asdict(cfg.harness))
+    harness_args = asdict(cfg.harness)
+    harness_args.pop('compute_loss')
     
-    if cfg.harness.compute_loss:
-        loss_metrics = {}
-        for task_name, task_losses in wrap.losses.items():
-            loss_metrics[f"{task_name}_loss"] = sum(task_losses) / len(task_losses)
-        results['results'].update(loss_metrics)
+    results = simple_evaluate(wrap, **harness_args)
     
+    if dist.get_rank() == 0:
+        if cfg.harness.compute_loss:
+            loss_metrics = {}
+            for task_name, task_losses in wrap.losses.items():
+                loss_metrics[f"{task_name}_loss"] = sum(task_losses) / len(task_losses)
+            results['results'].update(loss_metrics)
+            
     val_results =  None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
