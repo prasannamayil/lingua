@@ -178,9 +178,11 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     for src in val_args.sources:
         path = os.path.join(val_args.root_dir, src)
         srcs[path] = 1.0
-    for src in train_cfg.data.sources:
-        path = os.path.join(train_cfg.data.root_dir, src)
-        srcs[path] = 1.0
+
+    if val_args.use_val_from_train_src:
+        for src in train_cfg.data.sources:
+            path = os.path.join(train_cfg.data.root_dir, src)
+            srcs[path] = 1.0
 
     multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
     path_to_iter = setup_sources(multi_state)
