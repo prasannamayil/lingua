@@ -207,6 +207,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         metrics = defaultdict(list)
         for i, ll in enumerate(loglikelihood):
             tmp = ll.sum().item()
+            tmp = -tmp
             metrics['nll'].append(tmp)
             metrics['nll_per_token'].append(tmp / len(ll))
             metrics['nll_per_char'].append(tmp / len(texts[i]))
