@@ -261,17 +261,22 @@ def launch_eval(cfg: EvalArgs):
     wrap.compute_loss = cfg.harness.compute_loss
     
     harness_args = asdict(cfg.harness)
-    harness_args.pop('compute_loss')
+    harness_args.pop('compute_loss', None)
     
     results = simple_evaluate(wrap, **harness_args)
     
-    if dist.get_rank() == 0:
+    if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
-            loss_metrics = {}
             for task_name, task_losses in wrap.losses.items():
-                loss_metrics[f"{task_name}_loss"] = sum(task_losses) / len(task_losses)
-            results['results'].update(loss_metrics)
-            
+                loss_value = sum(task_losses) / len(task_losses)
+
+                if task_name in results["results"]:
+                    results["results"][task_name]["loss"] = loss_value
+                else:
+                    results["results"][task_name] = {
+                        "loss": loss_value
+                    }
+
     val_results =  None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)

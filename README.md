@@ -279,18 +279,80 @@ bash run_mamba.sh 8 mamba_7b.yaml API_KEY # arg1 is number of GPUs, arg2 is conf
 
 ## Evaluations
 
-Evaluations can run either during training periodically or you directly launch evals on a given checkpoint as follows:
+Evaluations can run either during training periodically or you can directly launch evals on checkpoints in two ways:
 
-```bash
-srun -n 8 python -u -m apps.main.eval config=apps/main/configs/eval.yaml
+### Single Checkpoint Evaluation
+1. Configure your `eval.yaml`:
+```yaml
+name: "debug_evals"
+ckpt_dir: /path/to/checkpoints/0000002900/  # Path to specific checkpoint
+dump_dir: /path/to/evals/0000002900/        # Where to save evaluation results
+metric_log_dir: /path/to/base_dir/          # Base directory for metrics
+generator:
+  max_tokens: 16384
+  dtype: bf16
+  temperature: 1.0
+harness:
+  compute_loss: true
+  tasks:
+    - hellaswag  # Add more tasks as needed
+validation:
+  use_val_from_train_src: false
+  max_steps: 1000
+  root_dir: /path/to/datasets/
+  sources:
+    - c4_shuffled
+    - pile_uc_shuffled
 ```
 
-You need to specify the checkpoint and dump dir of the evaluation in that config
-
-Or through `stool` with
-
+2. Run evaluation:
 ```bash
-python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml nodes=1 account=fair_amaia_cw_codegen qos=lowest
+# Using SLURM
+srun -n 8 python -u -m apps.main.eval config=apps/main/configs/eval.yaml
+
+# Using stool
+python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml nodes=1 account=your_account qos=lowest
+
+# Using condor
+bash run_eval.sh 8 eval.yaml YOUR_API_KEY  # arg1: number of GPUs, arg2: config file, arg3: API key
+```
+
+### Multiple Checkpoint Evaluation
+To evaluate all checkpoints in a directory:
+
+1. Configure your `eval.yaml` as above, but only specify the base checkpoint directory:
+```yaml
+name: "debug_evals"
+ckpt_dir: /path/to/checkpoints/0000002900/  # This will be overridden for each checkpoint
+dump_dir: /path/to/evals/0000002900/        # This will be overridden for each checkpoint
+metric_log_dir: /path/to/base_dir/          # Base directory for all evaluations
+# ... rest of the config remains the same ...
+```
+
+2. Run multi-evaluation:
+```bash
+bash run_multi_eval.sh 8 eval.yaml YOUR_API_KEY [optional_eval_name]
+```
+
+This will:
+- Create a new timestamped directory (or use optional_eval_name if provided)
+- Evaluate all checkpoints in numerical order
+- Generate per-checkpoint results and aggregated metrics files
+
+The output structure will be:
+```
+base_dir/
+├── multi_eval_20240321_120000/  # or your custom eval_name
+│   ├── config.yaml
+│   ├── metrics.eval.jsonl        # Aggregated evaluation results
+│   ├── metrics.validation.jsonl  # Aggregated validation results
+│   └── evals/
+│       ├── 100/                 # Results for checkpoint 100
+│       │   ├── config.yaml
+│       │   ├── results.json
+│       │   └── validation.json
+│       ├── 200/                 # Results for checkpoint 200
+│       └── ...
 ```
 
 ## Dump dir structure
