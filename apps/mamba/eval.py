@@ -1,5 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-
+import torch.distributed as dist
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
@@ -80,10 +80,29 @@ def launch_eval(cfg: EvalArgs):
     generator = PackedCausalMambaGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)
-    results = simple_evaluate(wrap, **asdict(cfg.harness))
-    val_results =  None
+    wrap.compute_loss = cfg.harness.compute_loss
+    
+    harness_args = asdict(cfg.harness)
+    harness_args.pop('compute_loss', None)
+    
+    results = simple_evaluate(wrap, **harness_args)
+    
+    if dist.get_rank() == 0 and results is not None:
+        if cfg.harness.compute_loss:
+            for task_name, task_losses in wrap.losses.items():
+                loss_value = sum(task_losses) / len(task_losses)
+
+                if task_name in results["results"]:
+                    results["results"][task_name]["loss"] = loss_value
+                else:
+                    results["results"][task_name] = {
+                        "loss": loss_value
+                    }
+
+    val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             f.write(json.dumps(results))
@@ -92,6 +111,7 @@ def launch_eval(cfg: EvalArgs):
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
             logger.info(f"All validation results: {val_results}")
+
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
 

@@ -1,12 +1,19 @@
 name: "debug_evals"
-# ckpt_dir: !!CHANGETHIS!!
-# dataset_dir: !!CHANGETHIS!!
-# dump_dir: !!CHANGETHIS!!
-tasks: boolq,hellaswag,nq,piqa,siqa,tqa,winogrande,obqa,arc_easy,arc_challenge,race.middle,race.high,gsm8k,bbh,mmlu,copa,human_eval_plus,mbpp
+ckpt_dir: /fast/pmayilvahanan/lm_logs/lingua/mamba_420M_c4_50BT/checkpoints/0000254500  # Will be set by eval script
+dump_dir: /fast/pmayilvahanan/lm_logs/lingua/mamba_420M_c4_50BT/checkpoints/0000254500  # Will be set by eval script
+metric_log_dir: /fast/pmayilvahanan/lm_logs/lingua/mamba_420M_c4_50BT  # Will be set by eval script
 generator:
-  compile_prefilling: false
-  reduce_generation_overhead: false
-  max_tokens: 8192
+  max_tokens: 16384
   dtype: bf16
-
-mp_size: 1
+  temperature: 1.0
+harness:
+  compute_loss: true
+  tasks:
+    - hellaswag
+validation:
+  use_val_from_train_src: false
+  max_steps: 1000
+  root_dir: /fast/smallick/datasets/
+  sources:
+    - c4_shuffled
+    - pile_uc_shuffled

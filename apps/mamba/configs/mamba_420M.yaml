@@ -1,7 +1,7 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba_420M_c4_50BT/
-name: "debug"
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba_420M_fw_edu_50BT/
+name: "mamba_420M"
 steps: 254_500
 probe_freq: null #100
 
@@ -37,7 +37,7 @@ model:
 data:
   root_dir: /fast/smallick/datasets/
   sources:
-      c4_shuffled: 1.0
+      fineweb_edu_100bt_shuffled: 1.0
   batch_size: 12
   prefetch_size: 1024
   seq_len: 2048
