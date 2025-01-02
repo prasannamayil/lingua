@@ -325,7 +325,7 @@ To evaluate all checkpoints in a directory:
 name: "debug_evals"
 ckpt_dir: /path/to/checkpoints/0000002900/  # This will be overridden for each checkpoint
 dump_dir: /path/to/evals/0000002900/        # This will be overridden for each checkpoint
-metric_log_dir: /path/to/base_dir/          # Base directory for all evaluations
+metric_log_dir: /path/to/base_dir/          # Base directory for all evaluations, most important arg
 # ... rest of the config remains the same ...
 ```
 
