@@ -13,7 +13,7 @@ source ~/.lingua_241216/bin/activate
 python setup/download_tokenizer.py llama3 /tmp/tokenizers/ --api_key=$API_KEY
 
 # Read base directory from config (modified to remove 'checkpoints' from path)
-BASE_DIR=$(python -c "import yaml; print(yaml.safe_load(open('apps/main/configs/$CONFIG'))['ckpt_dir'].rsplit('/', 3)[0])")
+BASE_DIR=$(python -c "import yaml; print(yaml.safe_load(open('apps/main/configs/$CONFIG'))['metric_log_dir'])")
 
 # Create new evaluation directory
 EVAL_DIR="${BASE_DIR}/${EVAL_NAME}"

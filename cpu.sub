@@ -1,7 +1,7 @@
 request_cpus = 64
 request_memory = 2000000
 # request_gpus = 1
-request_disk = 2000G
+request_disk = 10000G
 # requirements = (TARGET.CUDACapability >= 7.0) && (TARGET.CUDAGlobalMemoryMb >=40000)
 # requirements = (CUDADeviceName == "NVIDIA H100 80GB HBM3")
 log_root = /is/cluster/fast/pmayilvahanan/jobs/$(ClusterId)
