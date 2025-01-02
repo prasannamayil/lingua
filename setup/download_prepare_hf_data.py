@@ -81,7 +81,7 @@ def download_dataset(repo_id, local_dir, allow_patterns):
     print(f"Dataset downloaded to {local_dir}")
 
 
-def parquet_to_jsonl(dataset, work_dir, src_dir, tgt_dir, ntasks=64):
+def parquet_to_jsonl(dataset, work_dir, src_dir, tgt_dir, content_key="text", ntasks=64):
     from datatrove.executor import LocalPipelineExecutor
     from datatrove.pipeline.readers import ParquetReader
     from datatrove.pipeline.writers import JsonlWriter
@@ -93,6 +93,7 @@ def parquet_to_jsonl(dataset, work_dir, src_dir, tgt_dir, ntasks=64):
                 file_progress=True,
                 doc_progress=True,
                 glob_pattern="**/*.parquet",
+                text_key=content_key,
             ),
             JsonlWriter(
                 tgt_dir,
@@ -181,7 +182,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
         "c4": "allenai/c4",
         "redpajama": "togethercomputer/RedPajama-Data-1T",
         "refineweb": "tiiuae/falcon-refinedweb",
-        "slimpajama": "togethercomputer/SlimPajama-627B"
+        "slimpajama": "cerebras/SlimPajama-627B"
     }[dataset]
 
     # Use temporary directory for initial processing
@@ -212,7 +213,7 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
         "c4": ".json.gz",
         "redpajama": [".jsonl", ".jsonl.zst"],
         "refineweb": ".jsonl",
-        "slimpajama": ".jsonl"
+        "slimpajama": ".jsonl.zst"
     }[dataset]
 
     cat_command = {
@@ -248,8 +249,8 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
             "stackexchange/*.jsonl", 
             "wikipedia/*.jsonl"
         ],
-        "refineweb": "*.jsonl",
-        "slimpajama": "*.jsonl"
+        "refineweb": "data/*",
+        "slimpajama": "*"
     }[dataset]
 
     suffix = ".jsonl"
@@ -264,11 +265,13 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
             download_redpajama(tmp_src_dir, num_processes)
         else:
             download_dataset(repo_id, tmp_src_dir, allow_patterns)
-            
-        run_command(f"cp -r {tmp_src_dir} {final_src_dir}")
 
-        if "fineweb" in dataset:
-            parquet_to_jsonl(dataset, work_dir, tmp_src_dir, tmp_src_dir)
+        if "fineweb" in dataset or "refineweb" in dataset:
+            content_key = "content" if "refineweb" in dataset else "text"
+            print(f"Using content_key: {content_key}")  # Debug print
+            parquet_to_jsonl(dataset, work_dir, tmp_src_dir, tmp_src_dir, content_key=content_key)
+
+        run_command(f"cp -r {tmp_src_dir} {final_src_dir}")
 
         # Rest of the processing remains the same but uses tmp directories
         os.environ["MEMORY"] = f"{memory}"
@@ -281,6 +284,10 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
             if dataset == "c4":
                 train_files = glob.glob(f"{src_dir}/en/c4-train.*{orig_extension}", recursive=True)
                 val_files = glob.glob(f"{src_dir}/en/c4-validation.*{orig_extension}", recursive=True)
+                print(f"Found {len(train_files)} training files and {len(val_files)} validation files")
+            elif dataset == "slimpajama":
+                train_files = glob.glob(f"{src_dir}/train/**/*{orig_extension}", recursive=True)
+                val_files = glob.glob(f"{src_dir}/validation/**/*{orig_extension}", recursive=True)
                 print(f"Found {len(train_files)} training files and {len(val_files)} validation files")
             else:
                 # Handle multiple extensions for RedPajama
@@ -336,7 +343,22 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32, batch_size=5, num_proce
                     f"ulimit -n 100000 && "
                     f"{cat_command} {' '.join(val_files)} | {terashuf_executable} > {tmp_out_dir}/{dataset}.val{suffix}"
                 )
-            elif dataset != "c4":
+            elif dataset == "slimpajama" and val_files:
+                print("Processing SlimPajama validation files...")
+                random.shuffle(val_files)
+                
+                # Process validation files in smaller batches
+                val_batch_size = 50  # Adjust this number if needed
+                for i in range(0, len(val_files), val_batch_size):
+                    batch = val_files[i:i + val_batch_size]
+                    print(f"Processing validation batch {i//val_batch_size + 1}/{(len(val_files) + val_batch_size - 1)//val_batch_size}")
+                    
+                    # Append to validation file using >>
+                    run_command(
+                        f"ulimit -n 100000 && "
+                        f"zstdcat {' '.join(batch)} | {terashuf_executable} >> {tmp_out_dir}/{dataset}.val{suffix}"
+                    )
+            else:
                 # Create validation set from chunks for other datasets
                 for i in range(nchunks):
                     run_command(
