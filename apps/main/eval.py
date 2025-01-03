@@ -187,8 +187,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
     path_to_iter = setup_sources(multi_state)
 
-    max_gen_len = generator.max_gen_len
-    # We temporarily lower max gen len
+    original_max_len = generator.max_gen_len
     generator.max_gen_len = 1
 
     all_val_metrics = {}
@@ -197,36 +196,58 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         texts = []
         logger.info(f"Running validation on {src}...")
         for step, (content, state) in enumerate(jsonl_iterator):
-            if state['current_iter'] > 0 or (val_args.max_steps is not None and step >= val_args.max_steps):
+            if val_args.max_steps is not None and step >= val_args.max_steps:
                 break
-            content_key = "text" if ("text" in content) else "content"
-            texts.append(content[content_key])
-        
+
+            # If read_jsonl yielded None, skip
+            if content is None:
+                continue
+
+            # Make sure content is actually a dictionary.
+            if not isinstance(content, dict):
+                logger.warning(f"Skipping non-dict content at step {step} in {src}: {content}")
+                continue
+
+            # Fallback among possible text keys
+            text_val = None
+            for key_candidate in ["text", "content", "doc"]:
+                if key_candidate in content:
+                    text_val = content[key_candidate]
+                    break
+
+            # If none of these keys works, skip
+            if not text_val or not isinstance(text_val, str) or not text_val.strip():
+                continue
+
+            # Append valid text
+            texts.append(text_val)
+
+        if not texts:
+            logger.warning(f"No valid texts found in {src}, skipping...")
+            continue
+
         _, loglikelihood, _ = generator.generate(texts)
-
         metrics = defaultdict(list)
-        for i, ll in enumerate(loglikelihood):
-            tmp = ll.sum().item()
-            tmp = -tmp
-            metrics['nll'].append(tmp)
-            metrics['nll_per_token'].append(tmp / len(ll))
-            metrics['nll_per_char'].append(tmp / len(texts[i]))
-
-            metrics['avg_seqlen'].append(len(ll))
+        for txt, ll in zip(texts, loglikelihood):
+            neg_ll = -ll.sum().item()
+            metrics["nll"].append(neg_ll)
+            metrics["nll_per_token"].append(neg_ll / len(ll))
+            metrics["nll_per_char"].append(neg_ll / len(txt))
+            metrics["avg_seqlen"].append(len(ll))
 
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
+
         metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
 
         name = os.path.basename(src)
         if name in all_val_metrics:
-            logger.warning(f"Duplicate source name {name}, path {src} in validation sources, renaming to {name}_1")
+            logger.warning(f"Duplicate source name {name}, path {src}, renaming to {name}_1")
             name = f"{name}_1"
         all_val_metrics[name] = metrics
 
-    generator.max_gen_len = max_gen_len
-
+    generator.max_gen_len = original_max_len
     return all_val_metrics
 
 def launch_eval(cfg: EvalArgs):
