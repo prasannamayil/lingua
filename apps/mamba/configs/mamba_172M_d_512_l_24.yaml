@@ -1,13 +1,13 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
-# param-count: 172,241,408
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_172M_d_512_l_12_pile_uc_10BT/
-name: llama_172M
-steps: 19_080
-probe_freq: null
-seed: 777
 
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba_172M_d_512_l_24_fw_edu_10BT/
+name: "mamba_172M"
+steps: 40_700
+probe_freq: null #100
+
+seed: 777
 optim:
-  lr: 3e-3
+  lr: 3.0e-3
   weight_decay: 0.033
   warmup: 5000
   lr_min_ratio: 0.000001
@@ -18,19 +18,27 @@ distributed:
   compile: true
   model_dtype: bf16
   matmul_allow_tf32: false
-  selective_activation_checkpointing: false
+  selective_activation_checkpointing: true
   tp_size: 1
 
 model:
   dim: 512
-  n_layers: 12
-  n_heads: 8
+  n_heads: 16
+  n_groups: 1
+  state_dim: 128
+  conv_size: 2
+  n_layers: 24
+  dt_bias: false
+  D_has_head_dim: false
+  init_args:
+    A_init_min: 0.01
+    A_init_max: 2
 
 data:
   root_dir: /fast/smallick/datasets/
   sources:
-      pile_uc_shuffled: 1.0
-  batch_size: 32
+      fineweb_edu_100bt_shuffled: 1.0
+  batch_size: 15
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2
@@ -46,10 +54,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 954
+    every: 2035
     keep: 3
   eval:
-    every: 954
+    every: 2035
     keep: -1
 
 logging:
@@ -84,5 +92,7 @@ eval:
       - refineweb_shuffled
       - slimpajama_shuffled
   generator:
+    compile_prefilling: false
+    reduce_generation_overhead: true
     max_tokens: 16384
     dtype: bf16

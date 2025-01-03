@@ -1,8 +1,8 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 # param-count: 75,897,088
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_76M_d_256_l_12_c4_1.5BT/
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_76M_d_256_l_12_fw_edu_10BT/
 name: llama_76M
-steps: 2_900
+steps: 19_080
 probe_freq: null
 seed: 777
 
@@ -29,7 +29,7 @@ model:
 data:
   root_dir: /fast/smallick/datasets/
   sources:
-      c4_shuffled: 1.0
+      fineweb_edu_100bt_shuffled: 1.0
   batch_size: 32
   prefetch_size: 1024
   seq_len: 2048
@@ -46,17 +46,18 @@ profiling:
 
 checkpoint:
   dump:
-    every: 100
+    every: 954
     keep: 3
   eval:
-    every: 100
+    every: 954
     keep: -1
-
+  
 logging:
   freq: 1
 
 eval:
   harness:
+    compute_loss: true
     tasks:
       - hellaswag
       - piqa
@@ -72,12 +73,16 @@ eval:
       - task: social_iqa
         dataset_kwargs:
           trust_remote_code: true
-      # - coqa
-      # - task: nq_open
-      #   num_fewshot: 5
-      # - triviaqa
   validation:
-    max_steps: 1000
+    use_val_from_train_src: false
+    max_steps: 5000
+    root_dir: /fast/smallick/datasets/
+    sources:
+      - c4_shuffled
+      - pile_uc_shuffled
+      - fineweb_edu_100bt_shuffled
+      - refineweb_shuffled
+      - slimpajama_shuffled
   generator:
     max_tokens: 16384
     dtype: bf16

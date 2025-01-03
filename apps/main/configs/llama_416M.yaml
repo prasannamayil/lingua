@@ -57,6 +57,7 @@ logging:
 
 eval:
   harness:
+    compute_loss: true
     tasks:
       - hellaswag
       - piqa
@@ -72,12 +73,16 @@ eval:
       - task: social_iqa
         dataset_kwargs:
           trust_remote_code: true
-      # - coqa
-      # - task: nq_open
-      #   num_fewshot: 5
-      # - triviaqa
   validation:
-    max_steps: 1000
+    use_val_from_train_src: false
+    max_steps: 5000
+    root_dir: /fast/smallick/datasets/
+    sources:
+      - c4_shuffled
+      - pile_uc_shuffled
+      - fineweb_edu_100bt_shuffled
+      - refineweb_shuffled
+      - slimpajama_shuffled
   generator:
     max_tokens: 16384
     dtype: bf16
