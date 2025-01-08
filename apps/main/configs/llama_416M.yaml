@@ -1,8 +1,8 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 # model size: 416,834,560
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_416M_fw_edu_50BT/
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_416M_fw_edu_8.4BT/
 name: llama_416M
-steps: 100_000
+steps: 16_021
 probe_freq: null
 seed: 777
 
@@ -46,10 +46,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 2000
+    every: 191
     keep: 3
   eval:
-    every: 2000
+    every: 191
     keep: -1
 
 logging:
@@ -65,6 +65,7 @@ eval:
       - arc_easy
       - arc_challenge
       - commonsense_qa
+      - openbookqa
       - task: copa
         dataset_kwargs:
           trust_remote_code: true

@@ -1,8 +1,8 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba_76M_d_256_l_24_fw_edu_10BT/
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba_76M_d_256_l_24_fw_edu_8.4BT/
 name: "mamba_76M"
-steps: 39_000
+steps: 28_484
 probe_freq: null #100
 
 seed: 777
@@ -54,10 +54,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 1950
+    every: 339
     keep: 3
   eval:
-    every: 1950
+    every: 339
     keep: -1
 
 logging:
@@ -73,6 +73,7 @@ eval:
       - arc_easy
       - arc_challenge
       - commonsense_qa
+      - openbookqa
       - task: copa
         dataset_kwargs:
           trust_remote_code: true

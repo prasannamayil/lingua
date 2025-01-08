@@ -1,0 +1,7 @@
+bash run_mamba.sh 8 mamba_420M_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_172M_d_512_l_24_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_158M_d_512_l_16_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_145M_d_512_l_8_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_76M_d_256_l_24_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_73M_d_256_l_16_c4_10BT.yaml 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
+bash run_mamba.sh 8 mamba_69M_d_256_l_8_c4_10BT.yaml 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

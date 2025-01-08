@@ -1,7 +1,7 @@
 name: "debug_evals"
 ckpt_dir: 
 dump_dir:
-metric_log_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_416M_c4_50BT/
+metric_log_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_416M_fw_edu_50BT/
 generator:
   max_tokens: 16384
   dtype: bf16

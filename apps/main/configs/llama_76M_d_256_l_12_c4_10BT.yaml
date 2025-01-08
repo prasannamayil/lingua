@@ -1,6 +1,6 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 # param-count: 75,897,088
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_76M_d_256_l_12_fw_edu_8.4BT/
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama_76M_d_256_l_12_c4_8.4BT/
 name: llama_76M
 steps: 16_021
 probe_freq: null
@@ -29,7 +29,7 @@ model:
 data:
   root_dir: /fast/smallick/datasets/
   sources:
-      fineweb_edu_100bt_shuffled: 1.0
+      c4_shuffled: 1.0
   batch_size: 32
   prefetch_size: 1024
   seq_len: 2048
