@@ -11,6 +11,7 @@ import os
 from sentencepiece import SentencePieceProcessor
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
+from transformers import GPT2TokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,21 @@ class Tokenizer(abc.ABC):
 
 class MockTokenizer(Tokenizer):
     n_words: int = 256
+    bos_id: int = 256
+    eos_id: int = 257
 
-    def encode(self, tokens, add_bos, add_eos):
-        return tokens
+    def encode(self, s, add_bos, add_eos):
+        return [ord(x) % 256 for x in s]
+
+    def decode(self, tokens):
+        return "".join(chr(t) for t in tokens)
+
+    def get_token_offsets(self, text, tokens=None):
+        if tokens is None:
+            tokens = self.encode(text, False, False)
+        offsets = list(range(len(tokens)))
+        substrs = [text[i : i + 1] for i in range(len(tokens))]
+        return substrs, offsets
 
 
 class ByteTokenizer(Tokenizer):
@@ -187,6 +200,45 @@ class TikTokenTokenizer(Tokenizer):
         return substrs, offsets
 
 
+# ------------------- [ NEW GPT2 TOKENIZER ] --------------------------------
+class GPT2HuggingFaceTokenizer(Tokenizer):
+    """
+    Example GPT2 tokenizer via Hugging Face 'transformers'.
+    By default, GPT2Tokenizer or GPT2TokenizerFast is BOS/EOS-less,
+    but we can add them artificially here if desired.
+    """
+    def __init__(self, model_path: str):
+        self.tok = GPT2TokenizerFast.from_pretrained(model_path)
+        # The actual GPT2 default doesn't have a dedicated BOS/EOS, but let's define them.
+        self.bos_id = self.tok.bos_token_id if self.tok.bos_token_id is not None else 50256
+        self.eos_id = self.tok.eos_token_id if self.tok.eos_token_id is not None else 50256
+        self.n_words = len(self.tok)  # vocab size
+
+    def encode(self, s: str, add_bos: bool, add_eos: bool):
+        tokens = self.tok.encode(s, add_special_tokens=False)
+        if add_bos:
+            tokens = [self.bos_id] + tokens
+        if add_eos:
+            tokens = tokens + [self.eos_id]
+        return tokens
+
+    def decode(self, tokens: List[int]):
+        return self.tok.decode(tokens, clean_up_tokenization_spaces=True)
+
+    def get_token_offsets(
+        self, text: str, tokens: Optional[List[int]] = None
+    ) -> Tuple[List[str], List[int]]:
+        # This is optional. If you need offsets, you can attempt:
+        if tokens is None:
+            tokens = self.encode(text, add_bos=False, add_eos=False)
+        enc = self.tok.encode_plus(text, return_offsets_mapping=True, add_special_tokens=False)
+        offsets = enc['offset_mapping']
+        # This is not a perfect match to the token IDs in all cases, but minimal example
+        # We'll return just the piece of text for each token
+        substrs = [text[start:end] for (start, end) in offsets]
+        return substrs, [start for (start, _) in offsets]
+
+
 def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
     if name == "bytes":
         return ByteTokenizer()
@@ -196,5 +248,8 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return SentencePieceTokenizer(path)
     elif name == "tiktoken":
         return TikTokenTokenizer(path)
+    elif name == "gpt2":
+        # Our new GPT2 huggingface-based tokenizer
+        return GPT2HuggingFaceTokenizer(path)
     else:
         raise NotImplementedError(f"{name} tokenizer type is not implemented")
