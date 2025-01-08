@@ -1,135 +1,169 @@
 import torch
 from torch import nn
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Optional
 
-# For minimal changes, we reuse the same base classes and cross_entropy
-# from the original scripts.
-from lingua.transformer import (
-    BaseTransformer,
-    BaseTransformerArgs,
-    cross_entropy,
-)
-from xformers.ops import fmha, AttentionBias
-from torch.nn.attention.flex_attention import create_block_mask, BlockMask
+# For convenience, you can keep or reuse some elements like cross_entropy in the same style
+# as in lingua/transformer.py, but ensure references to LLaMA-specific features (e.g. rotary
+# embeddings, RMSNorm, "multiple_of" feed-forward norms) are removed or replaced.
 
-
-# We replace RMSNorm usage with nn.LayerNorm for GPT2
-# We also rename the model from LMTransformer -> GPT2Transformer
-
-def create_causal_mask(seqlen, attn_impl, sliding_window):
+def cross_entropy(pred, target, **kwargs):
     """
-    Minimal copy from the llama code. GPT2 also uses a causal (lower-triangular)
-    attention mask. We keep references to local/sliding window if you'd like,
-    or remove them. We'll keep them for minimal changes.
+    Optional: same cross_entropy from llama code (lingua/transformer.py).
+    Typically used for next-token prediction.
     """
-    if sliding_window is not None and attn_impl == "xformers":
-        return fmha.attn_bias.LocalAttentionFromBottomRightMask(
-            window_left=sliding_window - 1, window_right=0
-        )
-    elif attn_impl == "xformers":
-        return fmha.attn_bias.LowerTriangularMask()
-    elif attn_impl == "sdpa":
-        return "causal"
-    elif attn_impl == "flex_attention":
-        # Note: causal_mask() is not explicitly in this file, so you may repurpose or define it here
-        # or do something simpler that yields a causal block mask. We'll keep the original.
-        def causal_mask(b, h, q_idx, kv_idx):
-            return q_idx >= kv_idx
-        return create_block_mask(causal_mask, None, None, seqlen, seqlen)
-    else:
-        raise NotImplementedError(
-            f"Attention {attn_impl} with {sliding_window} sliding window not implemented"
-        )
+    from torch.nn import functional as F
+    return F.nll_loss(
+        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
+        target.flatten(end_dim=-1),
+        **kwargs,
+    )
 
 
 @dataclass
-class GPT2TransformerArgs(BaseTransformerArgs):
-    """
-    Minimal changes from 'LMTransformerArgs'.
-    GPT2 typically uses LayerNorm, so we remove references to RMSNorm.
-    """
-    seed: int = 42
-    vocab_size: int = -1
-    weight_tying: bool = True  # GPT2 typically ties input/output embeddings
-    sliding_window: Optional[int] = None
+class GPT2TransformerArgs:
+    """Minimal GPT-2 style arguments, separate from any LLaMA specifics."""
+    dim: int = 768                # e.g. hidden size
+    n_layers: int = 12
+    n_heads: int = 12
+    n_positions: int = 1024       # GPT2 typically 1024 context
+    norm_eps: float = 1e-5
+    # Additional GPT2-specific fields if needed (e.g. feed-forward factor, LR scheduling, etc.)
 
 
-class GPT2Transformer(BaseTransformer):
+class GPT2Attention(nn.Module):
     """
-    A minimal GPT2-like Transformer that replaces RMSNorm with nn.LayerNorm
-    and reuses the rest. 
+    GPT-2 style attention block:
+    - no rope embeddings
+    - typically uses learned positional embeddings
+    - uses nn.LayerNorm, etc.
     """
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
 
+        self.c_attn = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        self.c_proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.register_buffer("mask", None, persistent=False)
+
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+        B, S, C = x.shape
+        qkv = self.c_attn(x)  # -> [B, S, 3 * C]
+        q, k, v = qkv.split(C, dim=2)
+
+        # Reshape into [B, S, n_heads, head_dim] then transpose for attn
+        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # [B, nH, S, head_dim]
+        k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Causal mask: normally GPT-2 uses a lower-triangular approach
+        # If an explicit attention_mask is provided, we incorporate it
+        att_weights = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)
+        if attention_mask is not None:
+            att_weights = att_weights + attention_mask
+        att_weights = nn.functional.softmax(att_weights, dim=-1)
+
+        out = torch.matmul(att_weights, v)  # [B, nH, S, head_dim]
+        out = out.transpose(1, 2).contiguous().view(B, S, C)
+        return self.c_proj(out)
+
+
+class GPT2MLP(nn.Module):
+    """
+    GPT-2 style Feed Forward block:
+    - Typically uses a single hidden layer of 4 * hidden_size
+    - with a GELU activation and then projecting back to hidden_size
+    """
+    def __init__(self, hidden_size: int, mlp_ratio: float = 4.0):
+        super().__init__()
+        inner_dim = int(hidden_size * mlp_ratio)
+        self.c_fc = nn.Linear(hidden_size, inner_dim, bias=True)
+        self.c_proj = nn.Linear(inner_dim, hidden_size, bias=True)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.c_proj(self.act(self.c_fc(x)))
+
+
+class GPT2Block(nn.Module):
+    """
+    GPT-2 Transformer Block:
+    - uses Attention + MLP + residual + layer norm
+    """
     def __init__(self, args: GPT2TransformerArgs):
-        super().__init__(args)
-        self.weight_tying = args.weight_tying
-        self.sliding_window = args.sliding_window
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        self.attn = GPT2Attention(hidden_size=args.dim, num_heads=args.n_heads)
+        self.ln_2 = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        self.mlp = GPT2MLP(hidden_size=args.dim, mlp_ratio=4.0)
 
-        assert args.vocab_size > 0, "GPT2 requires a vocab size > 0"
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+        # Attention sub-layer
+        h = self.ln_1(x)
+        x = x + self.attn(h, attention_mask=attention_mask)
 
-        self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
+        # Feedforward sub-layer
+        h2 = self.ln_2(x)
+        x = x + self.mlp(h2)
+        return x
 
-        # GPT2 uses standard LayerNorm with bias
-        self.norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
 
-        self.output = nn.Linear(
-            args.dim,
-            args.vocab_size,
-            bias=False,
-        )
-
-        # If we want weight tying
-        if args.weight_tying:
-            self.output.weight = self.tok_embeddings.weight
+class GPT2BaseTransformer(nn.Module):
+    """
+    A GPT-2 style base module, with learned position embeddings
+    plus a stack of GPT2Block modules.
+    """
+    def __init__(self, args: GPT2TransformerArgs):
+        super().__init__()
+        self.args = args
+        self.wte = nn.Embedding(args.n_positions, args.dim)     # position embeddings
+        self.wpe = nn.Embedding(args.n_positions, args.dim)     # optional: GPT uses wte for tokens, wpe for positions
+        self.blocks = nn.ModuleList([GPT2Block(args) for _ in range(args.n_layers)])
+        self.ln_f = nn.LayerNorm(args.dim, eps=args.norm_eps)
 
     def forward(
         self,
-        token_values: torch.Tensor,
-        target: Optional[torch.Tensor] = None,
-        tok_idx: Optional[torch.Tensor] = None,
-        mask: Optional[Union[BlockMask, AttentionBias, torch.Tensor, str]] = None,
-        attn_impl: str = "sdpa",
-    ):
-        bsz, seqlen = token_values.shape
-
-        h = self.tok_embeddings(token_values)
-
-        mask = (
-            mask
-            if mask is not None
-            else create_causal_mask(seqlen, attn_impl, self.sliding_window)
-        )
-
-        # The super().forward() calls into the stacked Transformer layers from BaseTransformer
-        h = super().forward(h, tok_idx=tok_idx, mask=mask, attn_impl=attn_impl)
-
-        logits = self.output(self.norm(h))
-        if target is not None:
-            return cross_entropy(logits, target)
-        else:
-            return logits
-
-    def reset_parameters(self, init_std=None):
+        x: torch.Tensor,
+        use_cache: bool = False,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Minimal re-implementation, optionally using GPT2 initialization, 
-        or leaving it basically the same from LLaMA code. We'll keep minimal changes.
+        x: [batch_size, seq_length] => token indices
+        Or if embedding is done externally, x might be [batch_size, seq_length, dim]
+        For minimal changes, assume x is token indices and we do the embedding here.
         """
-        super().reset_parameters()
-        init_std = init_std or (self.dim ** -0.5)
-        self.norm.reset_parameters()
-        nn.init.trunc_normal_(
-            self.tok_embeddings.weight,
-            mean=0.0,
-            std=init_std,
-            a=-3 * init_std,
-            b=3 * init_std,
-        )
-        if not self.weight_tying:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=init_std,
-                a=-3 * init_std,
-                b=3 * init_std,
-            )
+        # If x is tokens, we embed them
+        bsz, seqlen = x.shape
+        positions = torch.arange(0, seqlen, device=x.device).unsqueeze(0)
+        # token embeddings
+        token_emb = self.wte(x)  # [B, S, dim]
+        # position embeddings
+        pos_emb = self.wpe(positions)  # [1, S, dim]
+        h = token_emb + pos_emb
+
+        # Potentially create a causal mask
+        # GPT2's default mask = lower-triangular
+        # shape: (1, 1, seq_len, seq_len), with 0 or -inf
+        if attention_mask is None:
+            causal_mask = torch.full((seqlen, seqlen), float("-inf"), device=x.device)
+            causal_mask = torch.triu(causal_mask, diagonal=1)
+            attention_mask = causal_mask.unsqueeze(0)  # broadcast across batch and heads
+
+        # pass through blocks
+        for block in self.blocks:
+            h = block(h, attention_mask=attention_mask)
+
+        return self.ln_f(h)
+
+
+#
+# Optionally provide an init_weights routine or any additional GPT-2–style settings.
+# Then you can import GPT2BaseTransformer in apps/gpt2/transformer.py and build
+# your GPT2 model on top of it (e.g. add output layer tied to embeddings, etc.).
+# 

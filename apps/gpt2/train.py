@@ -54,13 +54,7 @@ from lingua.optim import OptimArgs, build_optimizer
 from lingua.profiling import ProfilerArgs, maybe_run_profiler
 from lingua.tokenizer import build_tokenizer
 # Use the GPT2 classes
-from apps.gpt2.transformer import (
-    GPT2TransformerArgs,
-    GPT2Transformer,
-    # If needed: build_fsdp_grouping_plan, 
-    # get_no_recompute_ops, 
-    # tp_parallelize
-)
+from apps.gpt2.transformer import GPT2TransformerArgs, GPT2Transformer
 from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 import wandb

@@ -16,6 +16,7 @@ from apps.main.generate import (
 # Import GPT2 classes
 from apps.gpt2.transformer import GPT2Transformer, GPT2TransformerArgs
 from lingua.tokenizer import Tokenizer, build_tokenizer
+from lingua.args import dataclass_from_dict
 
 
 def main():

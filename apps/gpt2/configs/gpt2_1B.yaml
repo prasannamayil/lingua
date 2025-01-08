@@ -27,6 +27,8 @@ model:
   dim: 1536
   n_layers: 24
   n_heads: 16
+  n_positions: 2048
+
   # Potentially tweak n_layers, dim, or n_heads further
 
 data:
