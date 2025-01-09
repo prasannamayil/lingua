@@ -54,7 +54,7 @@ from lingua.optim import OptimArgs, build_optimizer
 from lingua.profiling import ProfilerArgs, maybe_run_profiler
 from lingua.tokenizer import build_tokenizer
 # Use the GPT2 classes
-from apps.gpt2.transformer import GPT2TransformerArgs, GPT2Transformer
+from apps.gpt2.transformer import GPT2TransformerArgs, GPT2BaseTransformer
 from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 import wandb
@@ -108,6 +108,104 @@ class TrainState(Stateful):
         self.scheduler.load_state_dict(state_dict["scheduler"])
 
 
+def validate_train_args(args: TrainArgs, output_size: int):
+    """
+    Validates training arguments for GPT2. 
+    This is adapted from the llama version but uses GPT2-friendly field names.
+    """
+    # If the model didn't specify a vocab_size or used a negative placeholder, set it here.
+    if args.model.vocab_size < 0:
+        logger.info(f"Setting model vocab_size to {output_size}")
+        args.model.vocab_size = output_size
+
+    # Ensure that the vocab size is correct
+    assert (
+        args.model.vocab_size == output_size
+    ), "Vocab size should be the same as the tokenizer's output size"
+
+    # Check that we have a valid dump_dir
+    assert args.dump_dir, "Dump dir not set"
+
+    # If no checkpoint path was provided, default to dump_dir/checkpoints
+    if args.checkpoint.path is None:
+        logger.info("No checkpoint path set. Defaulting to dump_dir/checkpoints.")
+        args.checkpoint.path = str(Path(args.dump_dir) / "checkpoints")
+
+    # Ensure each data source path exists
+    for source in args.data.sources:
+        data_path = os.path.join(args.data.root_dir, source)
+        assert os.path.exists(data_path), f"{data_path} doesn't exist"
+
+    # Validate distribution settings. E.g. dp * shard * tp_size == world_size
+    ws = get_world_size()
+    product = (
+        args.distributed.dp_replicate
+        * args.distributed.dp_shard
+        * args.distributed.tp_size
+    )
+    if product != ws:
+        # Attempt to fix dp_replicate automatically
+        assert ws % args.distributed.dp_shard == 0, (
+            f"World size {ws} not divisible by dp_shard={args.distributed.dp_shard}"
+        )
+        args.distributed.dp_replicate = ws // args.distributed.dp_shard
+        assert (
+            args.distributed.dp_replicate % args.distributed.tp_size == 0
+        ), f"dp_replicate is not divisible by tp_size={args.distributed.tp_size}"
+        args.distributed.dp_replicate = (
+            args.distributed.dp_replicate // args.distributed.tp_size
+        )
+
+        logger.warning(
+            f"Adjusted Data Parallel size to "
+            f"{args.distributed.dp_replicate * args.distributed.dp_shard}"
+        )
+        assert (
+            args.distributed.dp_replicate
+            * args.distributed.dp_shard
+            * args.distributed.tp_size
+            == ws
+        ), "After adjustment, dp_replicate * dp_shard * tp_size must match world_size"
+
+        if args.distributed.fsdp_type == "no_shard":
+            assert (
+                args.distributed.dp_shard == 1
+                and args.distributed.dp_replicate == ws
+            ), "no_shard requires dp_shard=1 and dp_replicate=world_size"
+
+    # Set model.n_positions if needed
+    # The LLaMA code used `max_seqlen`; for GPT2, let's align seq_len with n_positions
+    args.model.n_positions = args.data.seq_len
+
+    # If you haven't tested tp_size > 1 for GPT2, you can keep the same warning
+    if args.distributed.tp_size == 1:
+        logger.warning(
+            "Tensor parallelism has not been tested for GPT2 in a while; use at your own risk."
+        )
+
+    # Check that we don't do a memory profile during probe steps
+    assert (
+        args.probe_freq != args.profiling.mem_steps
+    ), "Don't profile during probe step"
+    assert (
+        args.probe_freq != args.profiling.profile_steps
+    ), "Don't profile during probe step"
+
+    # If using wandb for logging, set the run name
+    if args.logging.wandb is not None:
+        args.logging.wandb.name = args.name
+
+    # Probe constraints
+    if args.probe_freq is not None:
+        # For GPT2, if you have the same constraints, keep them:
+        assert (
+            args.distributed.tp_size == 1
+        ), "Probing not supported with tensor parallelism"
+        assert (
+            args.distributed.selective_activation_checkpointing is False
+        ), "Probing not supported with selective checkpointing"
+
+
 preemption_flag = dict(flag=False)
 
 
@@ -129,9 +227,10 @@ def every_n_steps(train_state, freq, acc_step=None, acc_freq=None):
 def train(args: TrainArgs):
     with ExitStack() as context_stack:
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
+        validate_train_args(args, tokenizer.n_words)
         if args.model.vocab_size < 0:
             args.model.vocab_size = tokenizer.n_words
-        assert args.model.vocab_size == tokenizer.n_words, "Vocab size mismatch"
+        assert args.model.vocab_size == tokenizer.n_words, f"{args.model.vocab_size} != {tokenizer.n_words} Vocab size mismatch"
 
         if get_is_master():
             os.makedirs(args.dump_dir, exist_ok=True)
@@ -157,7 +256,7 @@ def train(args: TrainArgs):
         logger.info("Building GPT2 model")
 
         with torch.device("meta"):
-            model = GPT2Transformer(args.model)
+            model = GPT2BaseTransformer(args.model)
 
         model_param_count = get_num_params(model)
 
@@ -259,6 +358,8 @@ def train(args: TrainArgs):
 
             input_ids = batch[:, :, 0].cuda()
             labels = batch[:, :, 1].cuda()
+            # print(f"input_ids shape: {input_ids.shape}")
+            # print(f"labels shape: {labels.shape}")
             data_load_time = round(timer() - data_load_start, 4)
             nwords_since_last_log += input_ids.numel()
 
@@ -286,8 +387,18 @@ def train(args: TrainArgs):
                     probe_loss.backward()
                     optimizer.zero_grad()
 
-            loss = model(input_ids, labels)
-            loss = loss / args.grad_acc_steps
+            optimizer.zero_grad()
+            
+            # Forward pass now returns loss and logits
+            loss, logits = model(
+                input_ids=input_ids,
+                labels=labels
+            )
+            
+            # Scale loss for gradient accumulation if needed
+            if args.grad_acc_steps > 1:
+                loss = loss / args.grad_acc_steps
+            
             loss.backward()
             loss = loss.detach() * args.grad_acc_steps
 

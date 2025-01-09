@@ -44,7 +44,7 @@ data:
   add_eos: true
   tokenizer:
     name: gpt2
-    path: gpt2  # Or local HuggingFace GPT2 path
+    path: tmp/tokenizers/tokenzier.json
 
 profiling:
   run: true

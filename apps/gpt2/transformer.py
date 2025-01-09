@@ -1,169 +1,226 @@
 import torch
 from torch import nn
 from dataclasses import dataclass
-from typing import Optional
-
-# For convenience, you can keep or reuse some elements like cross_entropy in the same style
-# as in lingua/transformer.py, but ensure references to LLaMA-specific features (e.g. rotary
-# embeddings, RMSNorm, "multiple_of" feed-forward norms) are removed or replaced.
-
-def cross_entropy(pred, target, **kwargs):
-    """
-    Optional: same cross_entropy from llama code (lingua/transformer.py).
-    Typically used for next-token prediction.
-    """
-    from torch.nn import functional as F
-    return F.nll_loss(
-        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
-        target.flatten(end_dim=-1),
-        **kwargs,
-    )
-
+from typing import Optional, Tuple
+import math
 
 @dataclass
 class GPT2TransformerArgs:
-    """Minimal GPT-2 style arguments, separate from any LLaMA specifics."""
-    dim: int = 768                # e.g. hidden size
+    dim: int = 768
     n_layers: int = 12
     n_heads: int = 12
-    n_positions: int = 1024       # GPT2 typically 1024 context
+    n_positions: int = 4096  # Increased from default 1024
     norm_eps: float = 1e-5
-    # Additional GPT2-specific fields if needed (e.g. feed-forward factor, LR scheduling, etc.)
-
+    vocab_size: int = 50257  # GPT2 vocabulary size
+    dropout: float = 0.1     # Added dropout
+    seed: int = 42
 
 class GPT2Attention(nn.Module):
     """
     GPT-2 style attention block:
     - no rope embeddings
     - typically uses learned positional embeddings
-    - uses nn.LayerNorm, etc.
+    - uses nn.LayerNorm
     """
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
+        assert self.head_dim * num_heads == hidden_size, "hidden_size must be divisible by num_heads"
 
+        # Combined QKV projection
         self.c_attn = nn.Linear(hidden_size, 3 * hidden_size, bias=True)
+        # Output projection
         self.c_proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        self.register_buffer("mask", None, persistent=False)
+        # Dropout
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        B, S, C = x.shape
-        qkv = self.c_attn(x)  # -> [B, S, 3 * C]
-        q, k, v = qkv.split(C, dim=2)
-
-        # Reshape into [B, S, n_heads, head_dim] then transpose for attn
-        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # [B, nH, S, head_dim]
+        B, S, C = x.shape  # batch, sequence, channels
+        
+        # Project to Q, K, V
+        qkv = self.c_attn(x)  # [B, S, 3*C]
+        q, k, v = qkv.split(self.hidden_size, dim=2)
+        
+        # Reshape to [B, n_heads, S, head_dim]
+        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Causal mask: normally GPT-2 uses a lower-triangular approach
-        # If an explicit attention_mask is provided, we incorporate it
-        att_weights = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)
+        # Compute attention scores
+        att = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        
+        # Apply attention mask if provided
         if attention_mask is not None:
-            att_weights = att_weights + attention_mask
-        att_weights = nn.functional.softmax(att_weights, dim=-1)
-
-        out = torch.matmul(att_weights, v)  # [B, nH, S, head_dim]
+            att = att + attention_mask
+            
+        # Softmax and dropout
+        att = self.attn_dropout(torch.softmax(att, dim=-1))
+        
+        # Apply attention to values
+        out = torch.matmul(att, v)  # [B, n_heads, S, head_dim]
+        
+        # Reshape and project output
         out = out.transpose(1, 2).contiguous().view(B, S, C)
-        return self.c_proj(out)
+        out = self.resid_dropout(self.c_proj(out))
+        
+        return out
 
 
 class GPT2MLP(nn.Module):
     """
     GPT-2 style Feed Forward block:
-    - Typically uses a single hidden layer of 4 * hidden_size
-    - with a GELU activation and then projecting back to hidden_size
+    - Uses a single hidden layer of 4 * hidden_size
+    - GELU activation
     """
-    def __init__(self, hidden_size: int, mlp_ratio: float = 4.0):
+    def __init__(self, hidden_size: int, dropout: float = 0.1):
         super().__init__()
-        inner_dim = int(hidden_size * mlp_ratio)
-        self.c_fc = nn.Linear(hidden_size, inner_dim, bias=True)
-        self.c_proj = nn.Linear(inner_dim, hidden_size, bias=True)
+        self.c_fc = nn.Linear(hidden_size, 4 * hidden_size, bias=True)
+        self.c_proj = nn.Linear(4 * hidden_size, hidden_size, bias=True)
         self.act = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.c_proj(self.act(self.c_fc(x)))
+        x = self.act(self.c_fc(x))
+        x = self.dropout(self.c_proj(x))
+        return x
 
 
 class GPT2Block(nn.Module):
     """
     GPT-2 Transformer Block:
-    - uses Attention + MLP + residual + layer norm
+    - Uses Attention + MLP
+    - Layer norm is applied before each sub-block (pre-norm)
     """
     def __init__(self, args: GPT2TransformerArgs):
         super().__init__()
         self.ln_1 = nn.LayerNorm(args.dim, eps=args.norm_eps)
-        self.attn = GPT2Attention(hidden_size=args.dim, num_heads=args.n_heads)
+        self.attn = GPT2Attention(
+            hidden_size=args.dim,
+            num_heads=args.n_heads,
+            dropout=args.dropout
+        )
         self.ln_2 = nn.LayerNorm(args.dim, eps=args.norm_eps)
-        self.mlp = GPT2MLP(hidden_size=args.dim, mlp_ratio=4.0)
+        self.mlp = GPT2MLP(hidden_size=args.dim, dropout=args.dropout)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        # Attention sub-layer
+        # Pre-norm for attention
         h = self.ln_1(x)
-        x = x + self.attn(h, attention_mask=attention_mask)
+        h = self.attn(h, attention_mask=attention_mask)
+        x = x + h
 
-        # Feedforward sub-layer
-        h2 = self.ln_2(x)
-        x = x + self.mlp(h2)
+        # Pre-norm for MLP
+        h = self.ln_2(x)
+        h = self.mlp(h)
+        x = x + h
+        
         return x
 
 
 class GPT2BaseTransformer(nn.Module):
-    """
-    A GPT-2 style base module, with learned position embeddings
-    plus a stack of GPT2Block modules.
-    """
     def __init__(self, args: GPT2TransformerArgs):
         super().__init__()
         self.args = args
-        self.wte = nn.Embedding(args.n_positions, args.dim)     # position embeddings
-        self.wpe = nn.Embedding(args.n_positions, args.dim)     # optional: GPT uses wte for tokens, wpe for positions
-        self.blocks = nn.ModuleList([GPT2Block(args) for _ in range(args.n_layers)])
+        
+        # Token and position embeddings
+        self.wte = nn.Embedding(args.vocab_size, args.dim)
+        self.wpe = nn.Embedding(args.n_positions, args.dim)
+        self.drop = nn.Dropout(args.dropout)
+        
+        # Transformer layers
+        self.layers = nn.ModuleList([GPT2Block(args) for _ in range(args.n_layers)])
         self.ln_f = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        
+        # Language modeling head
+        # Tie weights with token embedding
+        self.lm_head = nn.Linear(args.dim, args.vocab_size, bias=False)
+        self.lm_head.weight = self.wte.weight  # Weight tying
+        
+        self.init_weights()
 
     def forward(
         self,
-        x: torch.Tensor,
-        use_cache: bool = False,
+        input_ids: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        x: [batch_size, seq_length] => token indices
-        Or if embedding is done externally, x might be [batch_size, seq_length, dim]
-        For minimal changes, assume x is token indices and we do the embedding here.
+        input_ids: [batch_size, seq_length]
+        labels: [batch_size, seq_length] or None
+        returns: (loss, logits) if labels provided, else (None, logits)
         """
-        # If x is tokens, we embed them
-        bsz, seqlen = x.shape
-        positions = torch.arange(0, seqlen, device=x.device).unsqueeze(0)
-        # token embeddings
-        token_emb = self.wte(x)  # [B, S, dim]
-        # position embeddings
-        pos_emb = self.wpe(positions)  # [1, S, dim]
-        h = token_emb + pos_emb
+        bsz, seqlen = input_ids.shape
+        
+        # Input validation
+        if seqlen > self.args.n_positions:
+            raise ValueError(
+                f"Input sequence length ({seqlen}) exceeds model's maximum "
+                f"position embedding size ({self.args.n_positions})"
+            )
+        
+        if torch.any(input_ids >= self.args.vocab_size) or torch.any(input_ids < 0):
+            raise ValueError(
+                f"Input contains token ids outside valid range [0, {self.args.vocab_size-1}]. "
+                f"Min: {input_ids.min().item()}, Max: {input_ids.max().item()}"
+            )
 
-        # Potentially create a causal mask
-        # GPT2's default mask = lower-triangular
-        # shape: (1, 1, seq_len, seq_len), with 0 or -inf
+        # Get positions
+        positions = torch.arange(0, seqlen, device=input_ids.device).unsqueeze(0)
+        
+        # Embeddings
+        token_emb = self.wte(input_ids)  # [B, S, dim]
+        pos_emb = self.wpe(positions)     # [1, S, dim]
+        hidden_states = self.drop(token_emb + pos_emb)
+
+        # Create causal mask if none provided
         if attention_mask is None:
-            causal_mask = torch.full((seqlen, seqlen), float("-inf"), device=x.device)
-            causal_mask = torch.triu(causal_mask, diagonal=1)
-            attention_mask = causal_mask.unsqueeze(0)  # broadcast across batch and heads
+            attention_mask = torch.full(
+                (seqlen, seqlen), float("-inf"), device=input_ids.device
+            )
+            attention_mask = torch.triu(attention_mask, diagonal=1)
+            attention_mask = attention_mask.unsqueeze(0)  # [1, S, S]
 
-        # pass through blocks
-        for block in self.blocks:
-            h = block(h, attention_mask=attention_mask)
+        # Forward through transformer layers
+        for block in self.layers:
+            hidden_states = block(hidden_states, attention_mask=attention_mask)
+        
+        hidden_states = self.ln_f(hidden_states)
+        logits = self.lm_head(hidden_states)
 
-        return self.ln_f(h)
+        # Calculate loss if labels provided
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # Flatten the tokens
+            loss = nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100
+            )
 
+        return loss, logits
 
-#
-# Optionally provide an init_weights routine or any additional GPT-2–style settings.
-# Then you can import GPT2BaseTransformer in apps/gpt2/transformer.py and build
-# your GPT2 model on top of it (e.g. add output layer tied to embeddings, etc.).
-# 
+    def init_weights(self):
+        def _init_weights(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+        self.apply(_init_weights)

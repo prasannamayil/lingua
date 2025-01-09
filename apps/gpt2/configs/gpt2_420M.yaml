@@ -2,7 +2,7 @@
 # Change "dump_dir" and "data" fields as needed
 
 dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/gpt2_420M_fw_edu_8.4BT/
-Mname: gpt2_420M
+name: gpt2_420M
 steps: 60000
 probe_freq: null
 seed: 777
@@ -25,16 +25,18 @@ distributed:
 model:
   # ~420M parameters approximate
   dim: 1024
-  n_layers: 24
+  n_layers: 29
   n_heads: 16
   n_positions: 2048
+  vocab_size: 50257
+  norm_eps: 1e-5
   # GPT2 architecture might also need a different norm_eps or other fields
 
 data:
   root_dir: /fast/smallick/datasets/
   sources:
       fineweb_edu_100bt_shuffled: 1.0
-  batch_size: 4
+  batch_size: 24
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2
@@ -43,6 +45,7 @@ data:
   add_eos: true
   tokenizer:
     name: gpt2
+    path: tmp/tokenizers/
 
 profiling:
   run: true
@@ -53,10 +56,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 1
+    every: 500
     keep: 3
   eval:
-    every: 1
+    every: 500
     keep: -1
 
 logging:

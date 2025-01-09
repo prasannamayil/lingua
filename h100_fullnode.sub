@@ -1,5 +1,5 @@
 request_cpus = 64
-request_gpus = 8
+request_gpus = 2
 request_memory = 500000
 #use template : FullNode
 request_disk = 300G

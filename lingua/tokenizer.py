@@ -250,6 +250,6 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return TikTokenTokenizer(path)
     elif name == "gpt2":
         # Our new GPT2 huggingface-based tokenizer
-        return GPT2HuggingFaceTokenizer(path)
+        return GPT2HuggingFaceTokenizer(name)
     else:
         raise NotImplementedError(f"{name} tokenizer type is not implemented")

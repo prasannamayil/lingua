@@ -20,7 +20,7 @@ from apps.main.generate import (
     load_consolidated_model_and_tokenizer,
 )
 # Import your GPT2 model definition here
-from apps.gpt2.transformer import GPT2Transformer, GPT2TransformerArgs
+from apps.gpt2.transformer import GPT2TransformerArgs, GPT2BaseTransformer
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.args import dump_config
 from lingua.data import init_choice_state, setup_sources
@@ -268,7 +268,7 @@ def launch_eval(cfg: EvalArgs):
     logger.info("Loading GPT2 model")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=GPT2Transformer,
+        model_cls=GPT2BaseTransformer,
         model_args_cls=GPT2TransformerArgs,
     )
     logger.info("Model loaded")
