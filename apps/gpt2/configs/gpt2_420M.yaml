@@ -48,7 +48,7 @@ data:
     path: tmp/tokenizers/
 
 profiling:
-  run: true
+  run: false
   mem_warmup: 0
   mem_steps: 4
   profile_warmup: 100
@@ -56,10 +56,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 200
+    every: 100
     keep: 3
   eval:
-    every: 200
+    every: 100
     keep: -1
 
 logging:

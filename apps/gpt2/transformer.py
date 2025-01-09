@@ -188,6 +188,8 @@ class GPT2BaseTransformer(nn.Module):
             )
             attention_mask = torch.triu(attention_mask, diagonal=1)
             attention_mask = attention_mask.unsqueeze(0)  # [1, S, S]
+            attention_mask = attention_mask.to(hidden_states.dtype)
+
 
         # Forward through transformer layers
         for block in self.layers:

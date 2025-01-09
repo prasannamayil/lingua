@@ -31,7 +31,7 @@ from lingua.distributed import (
     get_world_size,
     setup_torch_distributed,
 )
-from lingua.stool import StoolArgs, launch_job
+from apps.gpt2.generate import GPT2Generator, GPT2GeneratorArgs
 
 logger = logging.getLogger()
 
@@ -273,12 +273,31 @@ def launch_eval(cfg: EvalArgs):
     )
     logger.info("Model loaded")
     model.eval()
-    generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
+
+    # Set model dtype to match training
+    param_dtype = dict(fp32=torch.float32, fp16=torch.float16, bf16=torch.bfloat16)[
+        train_cfg.distributed.model_dtype
+    ]
+    model = model.to(dtype=param_dtype)
+    
+    # Create generator with matching dtype
+    generator_args = GPT2GeneratorArgs(**asdict(cfg.generator))
+    generator_args.dtype = train_cfg.distributed.model_dtype  # Use same dtype as training
+    generator = GPT2Generator(
+        generator_args,
+        model,
+        tokenizer
+    )
 
     wrap = EvalHarnessLM(generator)
     wrap.compute_loss = cfg.harness.compute_loss
     harness_args = asdict(cfg.harness)
     harness_args.pop('compute_loss', None)
+
+    # Add error handling for division by zero
+    if cfg.harness.bootstrap_iters == 0:
+        logger.warning("bootstrap_iters is 0, setting to default 100000")
+        harness_args['bootstrap_iters'] = 100000
 
     results = simple_evaluate(wrap, **harness_args)
 
