@@ -36,7 +36,7 @@ data:
   root_dir: /fast/smallick/datasets/
   sources:
       fineweb_edu_100bt_shuffled: 1.0
-  batch_size: 12
+  batch_size: 6
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2
@@ -56,10 +56,10 @@ profiling:
 
 checkpoint:
   dump:
-    every: 500
+    every: 200
     keep: 3
   eval:
-    every: 500
+    every: 200
     keep: -1
 
 logging:
