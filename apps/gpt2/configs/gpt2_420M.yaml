@@ -36,7 +36,7 @@ data:
   root_dir: /fast/smallick/datasets/
   sources:
       fineweb_edu_100bt_shuffled: 1.0
-  batch_size: 24
+  batch_size: 12
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2

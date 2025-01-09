@@ -390,7 +390,7 @@ def train(args: TrainArgs):
             optimizer.zero_grad()
             
             # Forward pass now returns loss and logits
-            loss, logits = model(
+            loss = model(
                 input_ids=input_ids,
                 labels=labels
             )

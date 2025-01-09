@@ -3,6 +3,7 @@ from torch import nn
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import math
+from lingua.transformer import cross_entropy
 
 @dataclass
 class GPT2TransformerArgs:
@@ -196,20 +197,12 @@ class GPT2BaseTransformer(nn.Module):
         logits = self.lm_head(hidden_states)
 
         # Calculate loss if labels provided
-        loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            # Flatten the tokens
-            loss = nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100
-            )
+            loss = cross_entropy(logits, labels)
+            return loss
+        else:   
+            return logits
 
-        return loss, logits
 
     def init_weights(self):
         def _init_weights(module):
