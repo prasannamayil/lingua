@@ -3,7 +3,7 @@ from torch import nn
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import math
-from lingua.transformer import cross_entropy
+from lingua.transformer import cross_entropy, RMSNorm
 
 @dataclass
 class GPT2TransformerArgs:
@@ -12,6 +12,7 @@ class GPT2TransformerArgs:
     n_heads: int = 12
     n_positions: int = 4096  # Increased from default 1024
     norm_eps: float = 1e-5
+    norm_type: str = "layer_norm"  # Add this line - can be "layer_norm" or "rms_norm"
     vocab_size: int = 50257  # GPT2 vocabulary size
     dropout: float = 0.1     # Added dropout
     seed: int = 42
@@ -102,13 +103,15 @@ class GPT2Block(nn.Module):
     """
     def __init__(self, args: GPT2TransformerArgs):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        # Choose normalization type based on args
+        norm_class = nn.LayerNorm if args.norm_type == "layer_norm" else RMSNorm
+        self.ln_1 = norm_class(args.dim, eps=args.norm_eps)
         self.attn = GPT2Attention(
             hidden_size=args.dim,
             num_heads=args.n_heads,
             dropout=args.dropout
         )
-        self.ln_2 = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        self.ln_2 = norm_class(args.dim, eps=args.norm_eps)
         self.mlp = GPT2MLP(hidden_size=args.dim, dropout=args.dropout)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
