@@ -16,14 +16,31 @@ from torch.nn.attention.flex_attention import (
 
 from lingua import probe
 
+
+def gelu_act(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x)
+
+
+def silu_act(x: torch.Tensor) -> torch.Tensor:
+    return F.silu(x)
+
+
+def cross_entropy(pred, target, **kwargs):
+    return F.nll_loss(
+        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
+        target.flatten(end_dim=-1),
+        **kwargs,
+    )
+
+
 flex_attention_comp = torch.compile(flex_attention)
 
 
 class InitStdFactor(Enum):
-    DISABLED = "disabled"  # Init std is divided by 1.0
-    GLOBAL_DEPTH = "global_depth"  # Init std is divided by sqrt(2*n_layers)
-    CURRENT_DEPTH = "current_depth"  # Init std is divided by sqrt(2*depth)
-    DIM_RATIO = "dim_ratio"  # Init std is divided by model_dim/4096
+    DISABLED = "disabled"
+    GLOBAL_DEPTH = "global_depth"
+    CURRENT_DEPTH = "current_depth"
+    DIM_RATIO = "dim_ratio"
 
 
 @dataclass
@@ -47,18 +64,15 @@ class BaseTransformerArgs:
 
     max_seqlen: int = 1024
 
-
-def cross_entropy(pred, target, **kwargs):
-    return F.nll_loss(
-        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
-        target.flatten(end_dim=-1),
-        **kwargs,
-    )
+    # We add these new attributes, to be inherited also by LMTransformerArgs
+    norm_type: str = "rms_norm"        # "rms_norm" or "layer_norm"
+    attn_type: str = "llama"          # "llama" (grouped kv) or "gpt" (standard MHA)
+    pos_embed_type: str = "rope"      # "rope" or "learned"
+    ffn_activation: str = "silu"      # "silu" or "gelu"
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    assert dim == 2, "Only dim=2 is supported. Check the implementation for other dims."
+    """Repeat kv heads if using LLaMA style grouped kv."""
     bs, slen, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
@@ -90,7 +104,6 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = torch.outer(t, freqs).float()
 
     cos, sin = freqs.cos(), freqs.sin()
-
     return torch.stack((cos, -sin, sin, cos), dim=-1).view(*freqs.size(), 2, 2)
 
 
@@ -300,6 +313,7 @@ class Attention(nn.Module):
         n_heads: int,
         n_kv_heads: int,
         rope_theta: float,
+        attn_type: str = "llama",  # "llama" or "gpt"
     ):
         super().__init__()
 
@@ -309,29 +323,16 @@ class Attention(nn.Module):
 
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
-        self.heads_per_group = self.n_heads // self.n_kv_heads
+        self.heads_per_group = (
+            self.n_heads // self.n_kv_heads if attn_type == "llama" else 1
+        )
+        self.attn_type = attn_type
 
-        self.wq = nn.Linear(
-            dim,
-            n_heads * head_dim,
-            bias=False,
-        )
-        self.wk = nn.Linear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-        )
-        self.wv = nn.Linear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-        )
-
-        self.wo = nn.Linear(
-            n_heads * head_dim,
-            dim,
-            bias=False,
-        )
+        self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
+        # For GPT style, n_kv_heads == n_heads, so no grouping needed
+        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
 
     def forward(
         self,
@@ -353,15 +354,21 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
+        # For "rope" usage, if we are in LLaMA style attn
+        if freq_cis is not None:
+            # We apply rotary emb only if LLaMA style or if you'd like rope for GPT as well. 
+            # Typically GPT uses learned pos embed, so freq_cis might be None. 
+            xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
 
         # This condition helps us be easily compatible
         # with inference by adding a pluggable KVCache
         if hasattr(self, "kv_cache"):
             xk, xv = self.kv_cache.update(xk, xv, tok_idx)
 
-        xk = repeat_kv(xk, self.heads_per_group, dim=2)
-        xv = repeat_kv(xv, self.heads_per_group, dim=2)
+        # If LLaMA style grouped kv
+        if self.attn_type == "llama":
+            xk = repeat_kv(xk, self.heads_per_group, dim=2)
+            xv = repeat_kv(xv, self.heads_per_group, dim=2)
 
         if attn_impl == "flex_attention":
             assert mask is None or isinstance(mask, BlockMask)
@@ -424,18 +431,23 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        activation_type: str = "silu",
         mp_size: int = 1,
     ):
         super().__init__()
 
+        self.dim = dim
+        # For GPT2, a typical ratio is 4x expansion + gelu
+        # For LLaMA, also 4x expansion + silu. So we keep that logic, but 
+        # let the user pick activation.
         hidden_dim = int(2 * hidden_dim / 3)
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
         assert hidden_dim % mp_size == 0
 
-        self.dim = dim
         self.hidden_dim = hidden_dim
+        self.activation_type = activation_type.lower()
 
         self.w1 = nn.Linear(
             dim,
@@ -457,7 +469,12 @@ class FeedForward(nn.Module):
         # B S D
         x1 = self.w1(x.view_as(x))
         x3 = self.w3(x.view_as(x))
-        output = self.w2(F.silu(x1) * x3)
+        if self.activation_type == "gelu":
+            act_fn = gelu_act
+        else:
+            # default to silu
+            act_fn = silu_act
+        output = self.w2(act_fn(x1) * x3)
         return output
 
     def reset_parameters(self, init_std=None, factor=1.0):
@@ -502,15 +519,23 @@ class TransformerBlock(nn.Module):
             n_heads=self.n_heads,
             n_kv_heads=self.n_kv_heads,
             rope_theta=args.rope_theta,
+            attn_type=args.attn_type,
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
+            activation_type=args.ffn_activation,
         )
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+        # Norm choices
+        if args.norm_type == "layer_norm":
+            self.attention_norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
+            self.ffn_norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
+        else:
+            self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+            self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(
         self,
@@ -520,6 +545,11 @@ class TransformerBlock(nn.Module):
         mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
         attn_impl: str = "sdpa",
     ) -> torch.Tensor:
+        # Follow LLaMA style: x + attn(...) then x + feed_forward(...), 
+        # or GPT style you'd do LN first or last. 
+        # (We do LN first because that’s how a LLaMA block works;
+        #  if you want exact GPT style you'd shift LN calls. 
+        #  Minimal edits keep it in place for now.)
 
         h = x + self.attention(
             self.attention_norm(x),
@@ -546,11 +576,17 @@ class BaseTransformer(nn.Module):
         self.init_base_std = args.init_base_std
         self.init_std_factor = InitStdFactor(args.init_std_factor)
         self.max_seqlen = args.max_seqlen
-        self.rope_embeddings = RotaryEmbedding(
-            theta=args.rope_theta,
-            head_dim=args.head_dim or args.dim // args.n_heads,
-            max_seqlen=args.max_seqlen,
-        )
+        self.args = args
+
+        # Rotary embedding if pos_embed_type='rope', else None
+        if args.pos_embed_type == "rope":
+            self.rope_embeddings = RotaryEmbedding(
+                theta=args.rope_theta,
+                head_dim=args.head_dim or args.dim // args.n_heads,
+                max_seqlen=args.max_seqlen,
+            )
+        else:
+            self.rope_embeddings = None
 
         self.layers = nn.ModuleList()
         for _ in range(args.n_layers):
@@ -563,16 +599,25 @@ class BaseTransformer(nn.Module):
         mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
         attn_impl: str = "sdpa",
     ):
-
-        freq_cis = self.rope_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+        # freq_cis for rope, or None if using learned positional embeddings
+        if self.rope_embeddings is not None:
+            freq_cis = self.rope_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+        else:
+            freq_cis = None
 
         for i, layer in enumerate(self.layers):
-            h = layer(h, freq_cis, tok_idx=tok_idx, mask=mask, attn_impl=attn_impl)
+            h = layer(
+                h,
+                freq_cis,
+                tok_idx=tok_idx,
+                mask=mask,
+                attn_impl=attn_impl,
+            )
         return h
 
     def reset_parameters(self):
-        # Either use fixed base std or sqrt model dim
-        self.rope_embeddings.reset_parameters()
+        if self.rope_embeddings is not None:
+            self.rope_embeddings.reset_parameters()
 
     def init_weights(self):
         self.reset_parameters()
