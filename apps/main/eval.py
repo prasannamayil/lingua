@@ -141,9 +141,21 @@ class EvalHarnessLM(LM):
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         prompts, continuations = zip(*[req.args for req in requests])
         inputs = [req.args[0] + req.args[1] for req in requests]
+        
+        # Add input validation
+        if not inputs:
+            return []
+            
+        # Ensure all inputs are strings
+        inputs = [str(inp) for inp in inputs]
+        
         max_gen_len = self.generator.max_gen_len
         self.generator.max_gen_len = 1
-        _, lls, greedy = self.generator.generate(inputs)
+        try:
+            _, lls, greedy = self.generator.generate(inputs)
+        except RuntimeError as e:
+            logger.error(f"Error during generation: {e}")
+            return [(0.0, False)] * len(inputs)
         results = []
         
         for p, ll, gr, req in zip(prompts, lls, greedy, requests):
@@ -275,8 +287,18 @@ def launch_eval(cfg: EvalArgs):
         model_cls=LMTransformer,
         model_args_cls=LMTransformerArgs,
     )
-    logger.info("Model loaded")
+    
+    # Add configuration validation
+    if hasattr(model, "norm_type"):
+        logger.info(f"Model normalization type: {model.norm_type}")
+        if model.norm_type == "layernorm":
+            # Ensure proper dtype for LayerNorm
+            for module in model.modules():
+                if isinstance(module, nn.LayerNorm):
+                    module.to(dtype=model.dtype)
+    
     model.eval()
+    logger.info("Model loaded")
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)

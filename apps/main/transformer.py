@@ -92,10 +92,10 @@ class LMTransformer(BaseTransformer):
         self.tok_embeddings = torch.nn.Embedding(args.vocab_size, args.dim)
 
         # (NEW) Optional learned positional embedding for GPT:
-        # Only if user chooses pos_embed_type == "learned".
-        self.pos_embeddings = None
         if args.pos_embed_type == "learned":
             self.pos_embeddings = torch.nn.Embedding(args.max_seqlen, args.dim)
+        else:
+            self.pos_embeddings = None
 
         # Norm on final hidden states before output
         #   (We keep the same approach as LLaMA, but you could also change to 
@@ -103,6 +103,8 @@ class LMTransformer(BaseTransformer):
         #   For GPT exactness, you might add a final LN also, but let's keep it simpler.
         if args.norm_type == "layernorm":
             self.norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
+            # Add dtype specification to match model dtype
+            self.norm = self.norm.to(dtype=torch.bfloat16 if args.model_dtype == "bf16" else torch.float32)
         else:
             self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -129,7 +131,11 @@ class LMTransformer(BaseTransformer):
         # (NEW) If we have a learned pos embedding, add it here:
         if self.pos_embeddings is not None:
             positions = torch.arange(seqlen, device=token_values.device)
-            # shape => (seqlen, dim) so we broadcast to (bsz, seqlen, dim)
+            # Clamp position indices if they exceed self.pos_embeddings.num_embeddings
+            if seqlen > self.pos_embeddings.num_embeddings:
+                # You could log a warning here:
+                # logger.warning(f"Sequence length {seqlen} exceeds pos_embed size; clamping to {self.pos_embeddings.num_embeddings}")
+                positions = positions.clamp_max(self.pos_embeddings.num_embeddings - 1)
             pos_emb = self.pos_embeddings(positions).unsqueeze(0).expand(bsz, -1, -1)
             h = h + pos_emb
 

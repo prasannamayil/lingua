@@ -25,6 +25,8 @@ from lingua.transformer import (
     lengths_to_start_ids,
 )
 from torch.nn.attention.flex_attention import create_block_mask
+import logging
+logger = logging.getLogger()
 
 
 def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
@@ -284,17 +286,25 @@ class PackedCausalTransformerGenerator:
 
     # From here on some methods for generation
     def prefill(self, tokens: torch.Tensor, lengths: torch.Tensor):
-        # Prefilling is done by taking multiple packed sequences and
-        # doing block diagonal attention on them so they remain independent
-        self.setup_prefilling(lengths=lengths)
-        prefill_out = self.model.forward(
-            tokens,
-            tok_idx=self.prefill_tok_id,
-            mask=self.prefill_mask,
-            attn_impl="flex_attention",
-        )
-        self.setup_generation(lengths=lengths)
-        return prefill_out
+        try:
+            self.setup_prefilling(lengths=lengths)
+            # Ensure tokens are long integers
+            if tokens.dtype != torch.long:
+                tokens = tokens.to(dtype=torch.long)
+            
+            prefill_out = self.model.forward(
+                tokens,
+                tok_idx=self.prefill_tok_id,
+                mask=self.prefill_mask,
+                attn_impl="flex_attention",
+            )
+            self.setup_generation(lengths=lengths)
+            return prefill_out
+        except RuntimeError as e:
+            logger.error(f"Error during prefilling: {e}")
+            if "CUDA error: device-side assert triggered" in str(e):
+                logger.error("Layer normalization error - check input shapes and dtypes")
+            raise
 
     def generate_next_token(self, current_token):
         # Since we're doing generation with multiple sequences at once
@@ -348,7 +358,9 @@ class PackedCausalTransformerGenerator:
             generated_tokens = [[] for _ in range(n_seqs)]
             is_done = [False for _ in range(n_seqs)]
             packed_batch, lengths = pack_prompts(batch)
-            packed_batch, lengths = packed_batch.cuda(), lengths.cuda()
+            # Ensure tokens stay as long integers while moving to cuda
+            packed_batch = packed_batch.to(device="cuda", dtype=torch.long)
+            lengths = lengths.cuda()
             n_seqs = lengths.size(0)
 
             # Prefilling cache

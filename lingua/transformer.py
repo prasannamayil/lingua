@@ -62,7 +62,7 @@ class BaseTransformerArgs:
     init_base_std: Optional[float] = None
     init_std_factor: str = "disabled"
 
-    max_seqlen: int = 1024
+    max_seqlen: int = 2048
 
     # We add these new attributes, to be inherited also by LMTransformerArgs
     norm_type: str = "rms_norm"        # "rms_norm" or "layer_norm"
