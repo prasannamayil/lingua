@@ -67,12 +67,17 @@ class LMTransformerArgs(BaseTransformerArgs):
     - attn_type      -> 'llama'    (default) or 'gpt'
     - pos_embed_type -> 'rope'     (default) or 'learned'
     - ffn_activation -> 'silu'     (default) or 'gelu'
+
+    New additions:
+    - dropout        -> Global dropout rate to be used across attention and feedforward
+    - use_gpt_init   -> If True, apply GPT-style weight init; else keep LLaMA-style
     """
 
     seed: int = 42
     vocab_size: int = -1
     weight_tying: bool = False
     sliding_window: Optional[int] = None
+
 
 class LMTransformer(BaseTransformer):
     def __init__(self, args: LMTransformerArgs):
@@ -163,6 +168,10 @@ class LMTransformer(BaseTransformer):
             return logits
 
     def reset_parameters(self, init_std=None):
+        """
+        If use_gpt_init == True, we do GPT-like initialization.
+        Otherwise fall back to the original LLaMA style.
+        """
         super().reset_parameters()
         init_std = init_std or (self.dim ** (-0.5))
 
@@ -195,6 +204,39 @@ class LMTransformer(BaseTransformer):
                 a=-3 * init_std,
                 b=3 * init_std,
             )
+
+    def init_weights(self):
+        if self.args.use_gpt_init:
+            # GPT-style initialization for top-level modules
+            def _gpt_like_weights(module):
+                if isinstance(module, nn.Linear):
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                    if module.bias is not None:
+                        torch.nn.init.zeros_(module.bias)
+                elif isinstance(module, nn.Embedding):
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                elif isinstance(module, nn.LayerNorm):
+                    module.bias.data.zero_()
+                    module.weight.data.fill_(1.0)
+                elif isinstance(module, RMSNorm):
+                    # Properly reset RMSNorm just like LLaMA
+                    module.reset_parameters()
+            
+            # 1) Apply GPT init to all modules in self
+            self.apply(_gpt_like_weights)
+
+            # 2) Ensure rope embeddings (if any) are also reset
+            if self.rope_embeddings is not None:
+                self.rope_embeddings.reset_parameters()
+
+            # 3) Also re-initialize each TransformerBlock
+            #    if it has a custom init_weights method:
+            for block in self.layers:
+                if hasattr(block, "init_weights"):
+                    block.init_weights()
+        else:
+            # Default LLaMA-style initialization
+            super().init_weights()
 
 
 # Optional policy for activation checkpointing. With None, we stick to the default (defined distributed.py: default_no_recompute_ops)

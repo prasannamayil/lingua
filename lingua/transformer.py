@@ -70,6 +70,10 @@ class BaseTransformerArgs:
     pos_embed_type: str = "rope"      # "rope" or "learned"
     ffn_activation: str = "silu"      # "silu" or "gelu"
 
+    # New flags for dropout and initialization
+    dropout: float = 0.0  # Global dropout rate (0.0 means no dropout)
+    use_gpt_init: bool = False  # If True, use GPT-style initialization
+
 
 def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
     """Repeat kv heads if using LLaMA style grouped kv."""
@@ -314,13 +318,13 @@ class Attention(nn.Module):
         n_kv_heads: int,
         rope_theta: float,
         attn_type: str = "llama",  # "llama" or "gpt"
+        dropout: float = 0.0,      # NEW
     ):
         super().__init__()
 
         self.dim = dim
         self.head_dim = head_dim
         self.rope_theta = rope_theta
-
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.heads_per_group = (
@@ -329,78 +333,80 @@ class Attention(nn.Module):
         self.attn_type = attn_type
 
         self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
-        # For GPT style, n_kv_heads == n_heads, so no grouping needed
         self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
 
+        # For dropping the final output of attention (residual dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+        # NEW for sdpa: keep track of attention dropout probability
+        self.attn_dropout_p = dropout
+
     def forward(
         self,
         x: torch.Tensor,
-        freq_cis: torch.Tensor,
+        freq_cis: Optional[torch.Tensor],
         tok_idx: Optional[torch.Tensor] = None,
-        mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
+        mask: Optional[Union[BlockMask, AttentionBias, str, torch.Tensor]] = None,
         attn_impl: str = "sdpa",
     ) -> torch.Tensor:
-        # B S D
         bsz, seq_len, dim = x.shape
-        xq = self.wq(x.view_as(x))
-        xk = self.wk(x.view_as(x))
-        xv = self.wv(x.view_as(x))
+        xq = self.wq(x)
+        xk = self.wk(x)
+        xv = self.wv(x)
 
         output_shape = xq.shape
-        # B S D -> B S H D
         xq = xq.view(bsz, seq_len, self.n_heads, self.head_dim)
         xk = xk.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
 
-        # For "rope" usage, if we are in LLaMA style attn
+        # Apply rotary embeddings if freq_cis is provided (LLaMA style or optional GPT usage)
         if freq_cis is not None:
-            # We apply rotary emb only if LLaMA style or if you'd like rope for GPT as well. 
-            # Typically GPT uses learned pos embed, so freq_cis might be None. 
             xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
 
-        # This condition helps us be easily compatible
-        # with inference by adding a pluggable KVCache
+        # Optional KVCache usage for incremental decoding
         if hasattr(self, "kv_cache"):
             xk, xv = self.kv_cache.update(xk, xv, tok_idx)
 
-        # If LLaMA style grouped kv
+        # If LLaMA style, repeat K/V heads
         if self.attn_type == "llama":
             xk = repeat_kv(xk, self.heads_per_group, dim=2)
             xv = repeat_kv(xv, self.heads_per_group, dim=2)
 
         if attn_impl == "flex_attention":
-            assert mask is None or isinstance(mask, BlockMask)
             xq, xk, xv = map(lambda e: e.transpose(1, 2), (xq, xk, xv))
             output = flex_attention_comp(xq, xk, xv, block_mask=mask)
-            output = output.transpose(1, 2).contiguous()  # B H S D -> B S H D
+            output = output.transpose(1, 2).contiguous()
 
         elif attn_impl == "fmha":
-            assert mask is None or isinstance(mask, AttentionBias)
+            # fmha expects B S H D; no dropout param here
             output = fmha.memory_efficient_attention(xq, xk, xv, attn_bias=mask)
-            # This uses B S H D instead of B H S D of pytorch
 
         elif attn_impl == "sdpa":
+            # PyTorch >=2.0 scaled_dot_product_attention can take dropout_p
+            # for dropping attention weights. We pass it conditionally if training.
             xq, xk, xv = map(lambda e: e.transpose(1, 2), (xq, xk, xv))
-            assert mask is None or isinstance(mask, (str, torch.Tensor))
             is_causal = (mask == "causal") if isinstance(mask, str) else False
-            mask = mask if isinstance(mask, torch.Tensor) else None
+            attn_mask = mask if isinstance(mask, torch.Tensor) else None
+
             output = F.scaled_dot_product_attention(
                 xq,
                 xk,
                 xv,
                 is_causal=is_causal,
-                attn_mask=mask,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_dropout_p if self.training else 0.0,  # NEW
             )
-            output = output.transpose(1, 2).contiguous()  # B H S D -> B S H D
+
+            output = output.transpose(1, 2).contiguous()
+
         else:
-            raise NotImplementedError(
-                f"Attention implementation {attn_impl} not supported"
-            )
+            raise NotImplementedError(f"Attention impl '{attn_impl}' is not supported")
 
-        output = self.wo(output.reshape(output_shape))
-
+        # Final projection + residual dropout
+        output = self.wo(output.view(output_shape))
+        output = self.resid_dropout(output)
         return output
 
     def reset_parameters(self, init_std=None, factor=1.0):
@@ -433,6 +439,7 @@ class FeedForward(nn.Module):
         ffn_dim_multiplier: Optional[float],
         activation_type: str = "silu",
         mp_size: int = 1,
+        dropout: float = 0.0,   # NEW
     ):
         super().__init__()
 
@@ -465,6 +472,9 @@ class FeedForward(nn.Module):
             bias=False,
         )
 
+        # NEW for global dropout
+        self.ff_dropout = nn.Dropout(dropout)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # B S D
         x1 = self.w1(x.view_as(x))
@@ -475,6 +485,8 @@ class FeedForward(nn.Module):
             # default to silu
             act_fn = silu_act
         output = self.w2(act_fn(x1) * x3)
+        # NEW for global dropout
+        output = self.ff_dropout(output)
         return output
 
     def reset_parameters(self, init_std=None, factor=1.0):
@@ -507,7 +519,7 @@ class TransformerBlock(nn.Module):
             args.n_heads is not None
         ), "Should specify at least head_dim or n_heads"
         self.head_dim = args.head_dim or args.dim // args.n_heads
-        self.n_heads = args.n_heads or args.dim // args.head_dim
+        self.n_heads = args.n_heads or args.dim // self.head_dim
         self.n_kv_heads = args.n_kv_heads or self.n_heads
 
         assert args.n_heads % self.n_kv_heads == 0
@@ -520,6 +532,7 @@ class TransformerBlock(nn.Module):
             n_kv_heads=self.n_kv_heads,
             rope_theta=args.rope_theta,
             attn_type=args.attn_type,
+            dropout=args.dropout  # NEW
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
@@ -527,6 +540,7 @@ class TransformerBlock(nn.Module):
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
             activation_type=args.ffn_activation,
+            dropout=args.dropout # NEW
         )
 
         # Norm choices
