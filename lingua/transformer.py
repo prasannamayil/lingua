@@ -74,6 +74,9 @@ class BaseTransformerArgs:
     dropout: float = 0.0  # Global dropout rate (0.0 means no dropout)
     use_gpt_init: bool = False  # If True, use GPT-style initialization
 
+    # bias for GPT2
+    bias: bool = False
+
 
 def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
     """Repeat kv heads if using LLaMA style grouped kv."""
@@ -319,6 +322,7 @@ class Attention(nn.Module):
         rope_theta: float,
         attn_type: str = "llama",  # "llama" or "gpt"
         dropout: float = 0.0,      # NEW
+        bias: bool = False,
     ):
         super().__init__()
 
@@ -332,10 +336,10 @@ class Attention(nn.Module):
         )
         self.attn_type = attn_type
 
-        self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
-        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
-        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
-        self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
+        self.wq = nn.Linear(dim, n_heads * head_dim, bias=bias)
+        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=bias)
+        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=bias)
+        self.wo = nn.Linear(n_heads * head_dim, dim, bias=bias)
 
         # For dropping the final output of attention (residual dropout)
         self.resid_dropout = nn.Dropout(dropout)
@@ -440,6 +444,7 @@ class FeedForward(nn.Module):
         activation_type: str = "silu",
         mp_size: int = 1,
         dropout: float = 0.0,   # NEW
+        bias: bool = False,
     ):
         super().__init__()
 
@@ -459,17 +464,17 @@ class FeedForward(nn.Module):
         self.w1 = nn.Linear(
             dim,
             hidden_dim,
-            bias=False,
+            bias=bias,
         )
         self.w3 = nn.Linear(
             dim,
             hidden_dim,
-            bias=False,
+            bias=bias,
         )
         self.w2 = nn.Linear(
             hidden_dim,
             dim,
-            bias=False,
+            bias=bias,
         )
 
         # NEW for global dropout
@@ -532,7 +537,8 @@ class TransformerBlock(nn.Module):
             n_kv_heads=self.n_kv_heads,
             rope_theta=args.rope_theta,
             attn_type=args.attn_type,
-            dropout=args.dropout  # NEW
+            dropout=args.dropout,
+            bias=args.bias  # NEW
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
@@ -540,7 +546,8 @@ class TransformerBlock(nn.Module):
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
             activation_type=args.ffn_activation,
-            dropout=args.dropout # NEW
+            dropout=args.dropout,
+            bias=args.bias  # NEW
         )
 
         # Norm choices

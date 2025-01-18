@@ -117,6 +117,9 @@ class LMTransformer(BaseTransformer):
 
         if args.weight_tying:
             self.output.weight = self.tok_embeddings.weight
+        
+        # drop tokens
+        self.drop = nn.Dropout(args.dropout)
 
     def forward(
         self,
@@ -142,7 +145,7 @@ class LMTransformer(BaseTransformer):
                 # logger.warning(f"Sequence length {seqlen} exceeds pos_embed size; clamping to {self.pos_embeddings.num_embeddings}")
                 positions = positions.clamp_max(self.pos_embeddings.num_embeddings - 1)
             pos_emb = self.pos_embeddings(positions).unsqueeze(0).expand(bsz, -1, -1)
-            h = h + pos_emb
+            h = self.drop(h + pos_emb)
 
         # -------------
         # Causal Mask

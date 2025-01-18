@@ -1,6 +1,6 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
 # model size: 416,834,560
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/gpt2_416M_llama_ablation_ln_gpt_learned_gelu_tiktoken_dropout_0.1_gpt_init_false_fw_edu_8.4BT/
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/gpt2_416M_llama_ablation_ln_gpt_learned_gelu_tiktoken_dropout_0.1_gpt_init_bias_fw_edu_8.4BT/
 name: llama_416M
 steps: 16_021
 probe_freq: null
@@ -30,7 +30,8 @@ model:
   pos_embed_type: learned # rope, learned
   ffn_activation: gelu # gelu, silu
   dropout: 0.1  # Enable GPT-style dropout (0.0 for LLaMA style)
-  use_gpt_init: false  # Use GPT-style initialization (false for LLaMA style)
+  use_gpt_init: true  # Use GPT-style initialization (false for LLaMA style)
+  bias: true
 
 data:
   root_dir: /fast/smallick/datasets/
