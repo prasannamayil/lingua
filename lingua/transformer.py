@@ -76,6 +76,7 @@ class BaseTransformerArgs:
 
     # bias for GPT2
     bias: bool = False
+    llama_linear: bool = True
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
@@ -445,10 +446,12 @@ class FeedForward(nn.Module):
         mp_size: int = 1,
         dropout: float = 0.0,   # NEW
         bias: bool = False,
+        llama_linear: bool = True,
     ):
         super().__init__()
 
         self.dim = dim
+        self.llama_linear = llama_linear
         # For GPT2, a typical ratio is 4x expansion + gelu
         # For LLaMA, also 4x expansion + silu. So we keep that logic, but 
         # let the user pick activation.
@@ -466,11 +469,12 @@ class FeedForward(nn.Module):
             hidden_dim,
             bias=bias,
         )
-        self.w3 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=bias,
-        )
+        if self.llama_linear:
+            self.w3 = nn.Linear(
+                dim,
+                hidden_dim,
+                bias=bias,
+            )
         self.w2 = nn.Linear(
             hidden_dim,
             dim,
@@ -483,13 +487,16 @@ class FeedForward(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # B S D
         x1 = self.w1(x.view_as(x))
-        x3 = self.w3(x.view_as(x))
         if self.activation_type == "gelu":
             act_fn = gelu_act
         else:
             # default to silu
             act_fn = silu_act
-        output = self.w2(act_fn(x1) * x3)
+        if self.llama_linear:
+            x3 = self.w3(x.view_as(x))
+            output = self.w2(act_fn(x1) * x3)
+        else:
+            output = self.w2(act_fn(x1))
         # NEW for global dropout
         output = self.ff_dropout(output)
         return output
@@ -499,7 +506,8 @@ class FeedForward(nn.Module):
         out_init_std = init_std or (self.hidden_dim ** (-0.5))
         in_init_std = in_init_std
         out_init_std = out_init_std / factor
-        for w in [self.w1, self.w3]:
+        weights_list = [self.w1, self.w3] if self.llama_linear else [self.w1]
+        for w in weights_list:
             nn.init.trunc_normal_(
                 w.weight,
                 mean=0.0,
@@ -547,13 +555,14 @@ class TransformerBlock(nn.Module):
             ffn_dim_multiplier=args.ffn_dim_multiplier,
             activation_type=args.ffn_activation,
             dropout=args.dropout,
-            bias=args.bias  # NEW
+            bias=args.bias,  # NEW
+            llama_linear=args.llama_linear
         )
 
         # Norm choices
         if args.norm_type == "layer_norm":
-            self.attention_norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
-            self.ffn_norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
+            self.attention_norm = nn.LayerNorm(args.dim, eps=args.norm_eps, bias=args.bias)
+            self.ffn_norm = nn.LayerNorm(args.dim, eps=args.norm_eps, bias=args.bias)
         else:
             self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
             self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)

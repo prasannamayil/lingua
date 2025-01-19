@@ -107,7 +107,7 @@ class LMTransformer(BaseTransformer):
         #    do it GPT style if needed.)
         #   For GPT exactness, you might add a final LN also, but let's keep it simpler.
         if args.norm_type == "layernorm":
-            self.norm = nn.LayerNorm(args.dim, eps=args.norm_eps)
+            self.norm = nn.LayerNorm(args.dim, eps=args.norm_eps, bias=args.bias)
             # Add dtype specification to match model dtype
             self.norm = self.norm.to(dtype=torch.bfloat16 if args.model_dtype == "bf16" else torch.float32)
         else:
