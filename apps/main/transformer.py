@@ -219,8 +219,11 @@ class LMTransformer(BaseTransformer):
                 elif isinstance(module, nn.Embedding):
                     torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 elif isinstance(module, nn.LayerNorm):
-                    module.bias.data.zero_()
-                    module.weight.data.fill_(1.0)
+                    with torch.no_grad():
+                        if module.bias is not None:
+                            module.bias.data.zero_()
+                        if module.weight is not None:
+                            module.weight.data.fill_(1.0)
                 elif isinstance(module, RMSNorm):
                     # Properly reset RMSNorm just like LLaMA
                     module.reset_parameters()

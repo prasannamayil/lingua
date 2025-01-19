@@ -577,7 +577,7 @@ class TransformerBlock(nn.Module):
     ) -> torch.Tensor:
         # Follow LLaMA style: x + attn(...) then x + feed_forward(...), 
         # or GPT style you'd do LN first or last. 
-        # (We do LN first because that’s how a LLaMA block works;
+        # (We do LN first because that's how a LLaMA block works;
         #  if you want exact GPT style you'd shift LN calls. 
         #  Minimal edits keep it in place for now.)
 
@@ -644,6 +644,16 @@ class BaseTransformer(nn.Module):
                 attn_impl=attn_impl,
             )
         return h
+
+    def clear_kv_cache(self):
+        """
+        Clear any kv_cache in each layer's Attention module
+        to prevent GPU memory leaks across epochs.
+        """
+        for layer in self.layers:
+            attn = getattr(layer, "attention", None)
+            if attn and hasattr(attn, "kv_cache"):
+                attn.kv_cache = None
 
     def reset_parameters(self):
         if self.rope_embeddings is not None:
