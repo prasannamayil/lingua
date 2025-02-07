@@ -54,7 +54,7 @@ profiling:
 
 checkpoint:
   dump:
-    every: 339
+    every: 1695
     keep: 3
   eval:
     every: 339

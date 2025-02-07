@@ -16,14 +16,31 @@ from torch.nn.attention.flex_attention import (
 
 from lingua import probe
 
+
+def gelu_act(x: torch.Tensor) -> torch.Tensor:
+    return F.gelu(x)
+
+
+def silu_act(x: torch.Tensor) -> torch.Tensor:
+    return F.silu(x)
+
+
+def cross_entropy(pred, target, **kwargs):
+    return F.nll_loss(
+        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
+        target.flatten(end_dim=-1),
+        **kwargs,
+    )
+
+
 flex_attention_comp = torch.compile(flex_attention)
 
 
 class InitStdFactor(Enum):
-    DISABLED = "disabled"  # Init std is divided by 1.0
-    GLOBAL_DEPTH = "global_depth"  # Init std is divided by sqrt(2*n_layers)
-    CURRENT_DEPTH = "current_depth"  # Init std is divided by sqrt(2*depth)
-    DIM_RATIO = "dim_ratio"  # Init std is divided by model_dim/4096
+    DISABLED = "disabled"
+    GLOBAL_DEPTH = "global_depth"
+    CURRENT_DEPTH = "current_depth"
+    DIM_RATIO = "dim_ratio"
 
 
 @dataclass
@@ -45,20 +62,25 @@ class BaseTransformerArgs:
     init_base_std: Optional[float] = None
     init_std_factor: str = "disabled"
 
-    max_seqlen: int = 1024
+    max_seqlen: int = 2048
 
+    # We add these new attributes, to be inherited also by LMTransformerArgs
+    norm_type: str = "rms_norm"        # "rms_norm" or "layer_norm"
+    attn_type: str = "llama"          # "llama" (grouped kv) or "gpt" (standard MHA)
+    pos_embed_type: str = "rope"      # "rope" or "learned"
+    ffn_activation: str = "silu"      # "silu" or "gelu"
 
-def cross_entropy(pred, target, **kwargs):
-    return F.nll_loss(
-        F.log_softmax(pred.flatten(end_dim=-2).float(), -1),
-        target.flatten(end_dim=-1),
-        **kwargs,
-    )
+    # New flags for dropout and initialization
+    dropout: float = 0.0  # Global dropout rate (0.0 means no dropout)
+    use_gpt_init: bool = False  # If True, use GPT-style initialization
+
+    # bias for GPT2
+    bias: bool = False
+    llama_linear: bool = True
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    assert dim == 2, "Only dim=2 is supported. Check the implementation for other dims."
+    """Repeat kv heads if using LLaMA style grouped kv."""
     bs, slen, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
@@ -90,7 +112,6 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = torch.outer(t, freqs).float()
 
     cos, sin = freqs.cos(), freqs.sin()
-
     return torch.stack((cos, -sin, sin, cos), dim=-1).view(*freqs.size(), 2, 2)
 
 
@@ -300,100 +321,97 @@ class Attention(nn.Module):
         n_heads: int,
         n_kv_heads: int,
         rope_theta: float,
+        attn_type: str = "llama",  # "llama" or "gpt"
+        dropout: float = 0.0,      # NEW
+        bias: bool = False,
     ):
         super().__init__()
 
         self.dim = dim
         self.head_dim = head_dim
         self.rope_theta = rope_theta
-
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
-        self.heads_per_group = self.n_heads // self.n_kv_heads
+        self.heads_per_group = (
+            self.n_heads // self.n_kv_heads if attn_type == "llama" else 1
+        )
+        self.attn_type = attn_type
 
-        self.wq = nn.Linear(
-            dim,
-            n_heads * head_dim,
-            bias=False,
-        )
-        self.wk = nn.Linear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-        )
-        self.wv = nn.Linear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-        )
+        self.wq = nn.Linear(dim, n_heads * head_dim, bias=bias)
+        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=bias)
+        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=bias)
+        self.wo = nn.Linear(n_heads * head_dim, dim, bias=bias)
 
-        self.wo = nn.Linear(
-            n_heads * head_dim,
-            dim,
-            bias=False,
-        )
+        # For dropping the final output of attention (residual dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+        # NEW for sdpa: keep track of attention dropout probability
+        self.attn_dropout_p = dropout
 
     def forward(
         self,
         x: torch.Tensor,
-        freq_cis: torch.Tensor,
+        freq_cis: Optional[torch.Tensor],
         tok_idx: Optional[torch.Tensor] = None,
-        mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
+        mask: Optional[Union[BlockMask, AttentionBias, str, torch.Tensor]] = None,
         attn_impl: str = "sdpa",
     ) -> torch.Tensor:
-        # B S D
         bsz, seq_len, dim = x.shape
-        xq = self.wq(x.view_as(x))
-        xk = self.wk(x.view_as(x))
-        xv = self.wv(x.view_as(x))
+        xq = self.wq(x)
+        xk = self.wk(x)
+        xv = self.wv(x)
 
         output_shape = xq.shape
-        # B S D -> B S H D
         xq = xq.view(bsz, seq_len, self.n_heads, self.head_dim)
         xk = xk.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seq_len, self.n_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
+        # Apply rotary embeddings if freq_cis is provided (LLaMA style or optional GPT usage)
+        if freq_cis is not None:
+            xq, xk = apply_rotary_emb(xq, xk, 1, freq_cis[0:seq_len])
 
-        # This condition helps us be easily compatible
-        # with inference by adding a pluggable KVCache
+        # Optional KVCache usage for incremental decoding
         if hasattr(self, "kv_cache"):
             xk, xv = self.kv_cache.update(xk, xv, tok_idx)
 
-        xk = repeat_kv(xk, self.heads_per_group, dim=2)
-        xv = repeat_kv(xv, self.heads_per_group, dim=2)
+        # If LLaMA style, repeat K/V heads
+        if self.attn_type == "llama":
+            xk = repeat_kv(xk, self.heads_per_group, dim=2)
+            xv = repeat_kv(xv, self.heads_per_group, dim=2)
 
         if attn_impl == "flex_attention":
-            assert mask is None or isinstance(mask, BlockMask)
             xq, xk, xv = map(lambda e: e.transpose(1, 2), (xq, xk, xv))
             output = flex_attention_comp(xq, xk, xv, block_mask=mask)
-            output = output.transpose(1, 2).contiguous()  # B H S D -> B S H D
+            output = output.transpose(1, 2).contiguous()
 
         elif attn_impl == "fmha":
-            assert mask is None or isinstance(mask, AttentionBias)
+            # fmha expects B S H D; no dropout param here
             output = fmha.memory_efficient_attention(xq, xk, xv, attn_bias=mask)
-            # This uses B S H D instead of B H S D of pytorch
 
         elif attn_impl == "sdpa":
+            # PyTorch >=2.0 scaled_dot_product_attention can take dropout_p
+            # for dropping attention weights. We pass it conditionally if training.
             xq, xk, xv = map(lambda e: e.transpose(1, 2), (xq, xk, xv))
-            assert mask is None or isinstance(mask, (str, torch.Tensor))
             is_causal = (mask == "causal") if isinstance(mask, str) else False
-            mask = mask if isinstance(mask, torch.Tensor) else None
+            attn_mask = mask if isinstance(mask, torch.Tensor) else None
+
             output = F.scaled_dot_product_attention(
                 xq,
                 xk,
                 xv,
                 is_causal=is_causal,
-                attn_mask=mask,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_dropout_p if self.training else 0.0,  # NEW
             )
-            output = output.transpose(1, 2).contiguous()  # B H S D -> B S H D
+
+            output = output.transpose(1, 2).contiguous()
+
         else:
-            raise NotImplementedError(
-                f"Attention implementation {attn_impl} not supported"
-            )
+            raise NotImplementedError(f"Attention impl '{attn_impl}' is not supported")
 
-        output = self.wo(output.reshape(output_shape))
-
+        # Final projection + residual dropout
+        output = self.wo(output.view(output_shape))
+        output = self.resid_dropout(output)
         return output
 
     def reset_parameters(self, init_std=None, factor=1.0):
@@ -424,40 +442,63 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        activation_type: str = "silu",
         mp_size: int = 1,
+        dropout: float = 0.0,   # NEW
+        bias: bool = False,
+        llama_linear: bool = True,
     ):
         super().__init__()
 
+        self.dim = dim
+        self.llama_linear = llama_linear
+        # For GPT2, a typical ratio is 4x expansion + gelu
+        # For LLaMA, also 4x expansion + silu. So we keep that logic, but 
+        # let the user pick activation.
         hidden_dim = int(2 * hidden_dim / 3)
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
         assert hidden_dim % mp_size == 0
 
-        self.dim = dim
         self.hidden_dim = hidden_dim
+        self.activation_type = activation_type.lower()
 
         self.w1 = nn.Linear(
             dim,
             hidden_dim,
-            bias=False,
+            bias=bias,
         )
-        self.w3 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=False,
-        )
+        if llama_linear:
+            self.w3 = nn.Linear(
+                dim,
+                hidden_dim,
+                bias=bias,
+            )
         self.w2 = nn.Linear(
             hidden_dim,
             dim,
-            bias=False,
+            bias=bias,
         )
+
+        # NEW for global dropout
+        self.ff_dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # B S D
         x1 = self.w1(x.view_as(x))
-        x3 = self.w3(x.view_as(x))
-        output = self.w2(F.silu(x1) * x3)
+        if self.activation_type == "gelu":
+            act_fn = gelu_act
+        else:
+            # default to silu
+            act_fn = silu_act
+        if self.llama_linear:
+            x3 = self.w3(x.view_as(x))
+            output = self.w2(act_fn(x1) * x3)
+        else:
+            output = self.w2(act_fn(x1))
+        # NEW for global dropout
+        output = self.ff_dropout(output)
         return output
 
     def reset_parameters(self, init_std=None, factor=1.0):
@@ -465,7 +506,8 @@ class FeedForward(nn.Module):
         out_init_std = init_std or (self.hidden_dim ** (-0.5))
         in_init_std = in_init_std
         out_init_std = out_init_std / factor
-        for w in [self.w1, self.w3]:
+        weights_list = [self.w1, self.w3] if self.llama_linear else [self.w1]
+        for w in weights_list:
             nn.init.trunc_normal_(
                 w.weight,
                 mean=0.0,
@@ -490,7 +532,7 @@ class TransformerBlock(nn.Module):
             args.n_heads is not None
         ), "Should specify at least head_dim or n_heads"
         self.head_dim = args.head_dim or args.dim // args.n_heads
-        self.n_heads = args.n_heads or args.dim // args.head_dim
+        self.n_heads = args.n_heads or args.dim // self.head_dim
         self.n_kv_heads = args.n_kv_heads or self.n_heads
 
         assert args.n_heads % self.n_kv_heads == 0
@@ -502,15 +544,28 @@ class TransformerBlock(nn.Module):
             n_heads=self.n_heads,
             n_kv_heads=self.n_kv_heads,
             rope_theta=args.rope_theta,
+            attn_type=args.attn_type,
+            dropout=args.dropout,
+            bias=args.bias  # NEW
         )
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
+            activation_type=args.ffn_activation,
+            dropout=args.dropout,
+            bias=args.bias,  # NEW
+            llama_linear=args.llama_linear
         )
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+        # Norm choices
+        if args.norm_type == "layer_norm":
+            self.attention_norm = nn.LayerNorm(args.dim, eps=args.norm_eps, bias=args.bias)
+            self.ffn_norm = nn.LayerNorm(args.dim, eps=args.norm_eps, bias=args.bias)
+        else:
+            self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+            self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(
         self,
@@ -520,6 +575,11 @@ class TransformerBlock(nn.Module):
         mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
         attn_impl: str = "sdpa",
     ) -> torch.Tensor:
+        # Follow LLaMA style: x + attn(...) then x + feed_forward(...), 
+        # or GPT style you'd do LN first or last. 
+        # (We do LN first because that's how a LLaMA block works;
+        #  if you want exact GPT style you'd shift LN calls. 
+        #  Minimal edits keep it in place for now.)
 
         h = x + self.attention(
             self.attention_norm(x),
@@ -546,11 +606,17 @@ class BaseTransformer(nn.Module):
         self.init_base_std = args.init_base_std
         self.init_std_factor = InitStdFactor(args.init_std_factor)
         self.max_seqlen = args.max_seqlen
-        self.rope_embeddings = RotaryEmbedding(
-            theta=args.rope_theta,
-            head_dim=args.head_dim or args.dim // args.n_heads,
-            max_seqlen=args.max_seqlen,
-        )
+        self.args = args
+
+        # Rotary embedding if pos_embed_type='rope', else None
+        if args.pos_embed_type == "rope":
+            self.rope_embeddings = RotaryEmbedding(
+                theta=args.rope_theta,
+                head_dim=args.head_dim or args.dim // args.n_heads,
+                max_seqlen=args.max_seqlen,
+            )
+        else:
+            self.rope_embeddings = None
 
         self.layers = nn.ModuleList()
         for _ in range(args.n_layers):
@@ -563,16 +629,35 @@ class BaseTransformer(nn.Module):
         mask: Optional[Union[BlockMask, AttentionBias, str]] = None,
         attn_impl: str = "sdpa",
     ):
-
-        freq_cis = self.rope_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+        # freq_cis for rope, or None if using learned positional embeddings
+        if self.rope_embeddings is not None:
+            freq_cis = self.rope_embeddings(seqlen=self.max_seqlen, tok_idx=tok_idx)
+        else:
+            freq_cis = None
 
         for i, layer in enumerate(self.layers):
-            h = layer(h, freq_cis, tok_idx=tok_idx, mask=mask, attn_impl=attn_impl)
+            h = layer(
+                h,
+                freq_cis,
+                tok_idx=tok_idx,
+                mask=mask,
+                attn_impl=attn_impl,
+            )
         return h
 
+    def clear_kv_cache(self):
+        """
+        Clear any kv_cache in each layer's Attention module
+        to prevent GPU memory leaks across epochs.
+        """
+        for layer in self.layers:
+            attn = getattr(layer, "attention", None)
+            if attn and hasattr(attn, "kv_cache"):
+                attn.kv_cache = None
+
     def reset_parameters(self):
-        # Either use fixed base std or sqrt model dim
-        self.rope_embeddings.reset_parameters()
+        if self.rope_embeddings is not None:
+            self.rope_embeddings.reset_parameters()
 
     def init_weights(self):
         self.reset_parameters()

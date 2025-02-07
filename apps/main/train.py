@@ -454,6 +454,8 @@ def train(args: TrainArgs):
             if torch_profiler:
                 xformers.profiler.step()
 
+            # Clears per-layer kv_cache so it doesn't pile up
+            model.clear_kv_cache()  # Clears per-layer kv_cache so it doesn't pile up
             # log metrics
             if every_n_steps(
                 train_state,

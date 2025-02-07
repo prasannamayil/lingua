@@ -6,13 +6,14 @@ import math
 
 import logging
 from torch import nn
-from torch.optim import AdamW, lr_scheduler
+from torch.optim import AdamW, lr_scheduler, SGD, Adam
 
 logger = logging.getLogger()
 
 
 @dataclass
 class OptimArgs:
+    optimizer_type: str = "adamw"
     lr: float = 3e-4
     weight_decay: float = 0.1
     epsilon: float = 1e-8
@@ -144,14 +145,33 @@ def build_lr_fn(args: OptimArgs, n_steps: int):
 
 def build_optimizer(model: nn.Module, args: OptimArgs, n_steps: int):
     logger.info("Starting build of optimizer...")
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=(args.beta1, args.beta2),
-        weight_decay=args.weight_decay,
-        eps=args.epsilon,
-        fused=True,  # Faster optim.step but can throw errors
-    )
+    if args.optimizer_type == "adamw":
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.beta1, args.beta2),
+            weight_decay=args.weight_decay,
+            eps=args.epsilon,
+            fused=True,  # Faster optim.step but can throw errors
+        )
+    elif args.optimizer_type == "sgd":
+        optimizer = SGD(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            fused=True
+        )
+    elif args.optimizer_type == "adam":
+        optimizer = Adam(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.beta1, args.beta2),
+            weight_decay=args.weight_decay,
+            eps=args.epsilon,
+            fused=True
+        )
+    else:
+        raise NotImplementedError(f"Unknown optimizer: {args.optimizer_type}")
 
     # scheduler
     lr_fn = build_lr_fn(args, n_steps)
