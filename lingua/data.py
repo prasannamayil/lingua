@@ -342,9 +342,15 @@ def pack_tokens(
         end_token = start_token
         sample_is_read = False
         while not sample_is_read:
-            assert start_token < len(
-                tokens
-            ), f"Start token index {start_token} bigger than sequence {len(tokens)}"
+            # Add safety check to reset start_token if it exceeds sequence length
+            if start_token >= len(tokens):
+                start_token = 0
+                sample_is_read = True
+                previous_state = state
+                print("Reset start_token to 0")
+                continue
+                
+            assert start_token < len(tokens), f"Start token index {start_token} bigger than sequence {len(tokens)}"
             free_space = buffer_size - len(buffer)
             seq_len = min(free_space, len(tokens) - start_token)
             end_token = start_token + seq_len

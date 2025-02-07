@@ -469,7 +469,7 @@ class FeedForward(nn.Module):
             hidden_dim,
             bias=bias,
         )
-        if self.llama_linear:
+        if llama_linear:
             self.w3 = nn.Linear(
                 dim,
                 hidden_dim,
