@@ -1,15 +1,15 @@
 # Template config, need to change dump_dir, data.root_dir and tokenizer.path
-# model size: 416,834,560
-dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/gpt2_416M_llama_ablation_ln_gpt_learned_gelu_tiktoken_dropout_0.1_gpt_init_bias_weight_tying_seed_42_warmup_500_llama_linear_false_fw_edu_8.4BT/
-name: llama_416M
-steps: 16_021
-probe_freq: null
-seed: 42
 
+dump_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/mamba/mamba_420M_gpt2_tokenizer_c4_8.4BT/
+name: "mamba_420M"
+steps: 36_621
+probe_freq: null #100
+
+seed: 777
 optim:
-  lr: 3e-3
+  lr: 3.0e-3
   weight_decay: 0.033
-  warmup: 500
+  warmup: 5000
   lr_min_ratio: 0.000001
   clip: 1.0
 
@@ -18,28 +18,27 @@ distributed:
   compile: true
   model_dtype: bf16
   matmul_allow_tf32: false
-  selective_activation_checkpointing: false
+  selective_activation_checkpointing: true
   tp_size: 1
 
 model:
-  dim: 1024
-  n_layers: 29
-  n_heads: 8
-  norm_type: layer_norm # layer_norm, rms_norm
-  attn_type: gpt  # gpt, llama
-  pos_embed_type: learned # rope, learned
-  ffn_activation: gelu # gelu, silu
-  dropout: 0.1  # Enable GPT-style dropout (0.0 for LLaMA style)
-  use_gpt_init: true  # Use GPT-style initialization (false for LLaMA style)
-  bias: true
-  weight_tying: true
-  llama_linear: false
+  dim: 1360
+  n_heads: 16
+  n_groups: 1
+  state_dim: 128
+  conv_size: 2
+  n_layers: 24
+  dt_bias: false
+  D_has_head_dim: false
+  init_args:
+    A_init_min: 0.01
+    A_init_max: 2
 
 data:
   root_dir: /fast/smallick/datasets/
   sources:
-      fineweb_edu_100bt_shuffled: 1.0
-  batch_size: 23
+      c4_shuffled: 1.0
+  batch_size: 14
   prefetch_size: 1024
   seq_len: 2048
   n_views: 2
@@ -47,18 +46,18 @@ data:
   add_bos: true
   add_eos: true
   tokenizer:
-    name: tiktoken
-    path: /tmp/tokenizers/original/tokenizer.model
+    name: gpt2
+    path: /tmp/tokenizers/
 
 profiling:
-  run: true
+  run: false
 
 checkpoint:
   dump:
-    every: 955
+    every: 2180
     keep: 3
   eval:
-    every: 191
+    every: 436
     keep: -1
 
 logging:
@@ -94,5 +93,7 @@ eval:
       - refineweb_shuffled
       - slimpajama_shuffled
   generator:
+    compile_prefilling: false
+    reduce_generation_overhead: true
     max_tokens: 16384
     dtype: bf16

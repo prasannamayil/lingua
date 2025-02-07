@@ -25,10 +25,10 @@ model:
   dim: 1024
   n_layers: 12
   n_heads: 8
-  norm_type: layer_norm
-  attn_type: gpt
-  pos_embed_type: learned
-  ffn_activation: gelu
+  norm_type: rms_norm # layer_norm, rms_norm
+  attn_type: gpt  # gpt, llama
+  pos_embed_type: learned # rope, learned
+  ffn_activation: gelu # gelu, silu
 
 data:
   root_dir: /fast/smallick/datasets/
