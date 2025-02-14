@@ -8,6 +8,15 @@ Meta Lingua is a minimal and fast LLM training and inference library designed fo
  <img src="lingua_overview.svg" width="100%"/>
 </p>
 
+## Notes on the fork
+
+In addition to the original code, we have made the following changes:
+- We add cross entropy loss on test sets computation to the eval script. In config set `harness.compute_loss` to `true`.
+- We add the option to download several datasets from huggingface. Check `download_prepare_hf_data.py` for the list of supported datasets.
+- We add new tokenizers. Check `download_tokenizer.py` for the list of supported tokenizers.
+- We add several configs for training models of different sizes, optimization hyperparameters, tokenizers, etc. Check `apps/main/configs` or `apps/mamba/configs` for the list of supported configs.
+- (Untested/in progress) we add the option to train gpt2 by editing the llama modules. Please find configs in `apps/main/configs_gpt`.
+
 ## Quick start
 
 The following commands launch a SLURM job that creates an environment for Meta Lingua.
@@ -317,43 +326,6 @@ python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml 
 bash run_eval.sh 8 eval.yaml YOUR_API_KEY  # arg1: number of GPUs, arg2: config file, arg3: API key
 ```
 
-### Multiple Checkpoint Evaluation
-To evaluate all checkpoints in a directory:
-
-1. Configure your `eval.yaml` as above, but only specify the base checkpoint directory:
-```yaml
-name: "debug_evals"
-ckpt_dir: /path/to/checkpoints/0000002900/  # This will be overridden for each checkpoint
-dump_dir: /path/to/evals/0000002900/        # This will be overridden for each checkpoint
-metric_log_dir: /path/to/base_dir/          # Base directory for all evaluations, most important arg
-# ... rest of the config remains the same ...
-```
-
-2. Run multi-evaluation:
-```bash
-bash run_multi_eval.sh 8 eval.yaml YOUR_API_KEY [optional_eval_name]
-```
-
-This will:
-- Create a new timestamped directory (or use optional_eval_name if provided)
-- Evaluate all checkpoints in numerical order
-- Generate per-checkpoint results and aggregated metrics files
-
-The output structure will be:
-```
-base_dir/
-├── multi_eval_20240321_120000/  # or your custom eval_name
-│   ├── config.yaml
-│   ├── metrics.eval.jsonl        # Aggregated evaluation results
-│   ├── metrics.validation.jsonl  # Aggregated validation results
-│   └── evals/
-│       ├── 100/                 # Results for checkpoint 100
-│       │   ├── config.yaml
-│       │   ├── results.json
-│       │   └── validation.json
-│       ├── 200/                 # Results for checkpoint 200
-│       └── ...
-```
 
 ## Dump dir structure
 
