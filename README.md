@@ -10,6 +10,8 @@ Meta Lingua is a minimal and fast LLM training and inference library designed fo
 
 ## Notes on the fork
 
+**Prasanna Mayilvahanan**
+
 In addition to the original code, we have made the following changes:
 - We add cross entropy loss on test sets computation to the eval script. In config set `harness.compute_loss` to `true`.
 - We add the option to download several datasets from huggingface. Check `download_prepare_hf_data.py` for the list of supported datasets.
