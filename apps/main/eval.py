@@ -253,6 +253,8 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         _, loglikelihood, _ = generator.generate(texts)
         metrics = defaultdict(list)
         for txt, ll in zip(texts, loglikelihood):
+            # TODO: check if this is correct, division by ln(2) is definitely missing
+            # are we averaging correctly?
             neg_ll = -ll.sum().item()
             metrics["nll"].append(neg_ll)
             metrics["nll_per_token"].append(neg_ll / len(ll))
