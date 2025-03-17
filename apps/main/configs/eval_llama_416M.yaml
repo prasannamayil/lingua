@@ -1,0 +1,57 @@
+name: "debug_evals"
+ckpt_dir: /is/cluster/fast/pmayilvahanan/lm_logs/lingua/llama/llama_416M_fw_edu_8.4BT/checkpoints/0000015853
+dump_dir: /is/cluster/fast/twiedemer/llm-line-logs/bpb/llama_416M_fw_edu_8.4BT/
+metric_log_dir: /is/cluster/fast/twiedemer/llm-line-logs/bpb/llama_416M_fw_edu_8.4BT/
+generator:
+  max_tokens: 16384
+  dtype: bf16
+  temperature: 1.0
+harness:
+  # verbosity: "DEBUG"
+  # compute_loss: true
+  tasks:
+    - task: hellaswag
+      metric_list:
+        - metric: bits_per_byte
+          higher_is_better: false
+    - task: piqa
+      # metric_list:
+      #   - bits_per_byte
+    - task: winogrande
+      # metric_list:
+        # - bits_per_byte
+    - task: arc_easy
+      # metric_list:
+      #   - bits_per_byte
+    - task: arc_challenge
+      # metric_list:
+      #   - bits_per_byte
+    - task: commonsense_qa
+      # metric_list:
+      #   - bits_per_byte
+    - task: copa
+      dataset_kwargs:
+        trust_remote_code: true
+      # metric_list:
+      #   - bits_per_byte
+    - task: winogrande
+      # metric_list:
+      #   - bits_per_byte
+    - task: mmlu
+      # metric_list:
+      #   - bits_per_byte
+    - task: social_iqa
+      dataset_kwargs:
+        trust_remote_code: true
+      # metric_list:
+      #   - bits_per_byte
+validation:
+  use_val_from_train_src: false
+  max_steps: 5000
+  root_dir: /fast/smallick/datasets/
+  sources:
+    - c4_shuffled
+    - pile_uc_shuffled
+    - fineweb_edu_100bt_shuffled
+    - refineweb_shuffled
+    - slimpajama_shuffled

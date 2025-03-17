@@ -1,19 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from collections import defaultdict
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
-import torch.distributed as dist
 import json
 import logging
 import os
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any, List, Optional, Tuple, Union
+
+import torch
+import torch.distributed as dist
+from lm_eval import simple_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
-from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
-import torch
+
 from apps.main.generate import (
     PackedCausalTransformerGenerator,
     PackedCausalTransformerGeneratorArgs,
@@ -62,12 +64,16 @@ class LMHarnessArgs:
     fewshot_random_seed: int = 1234
     compute_loss: bool = False
 
+
 @dataclass
 class ValidationArgs:
-    max_steps: Optional[int] = None # If None the whole validation file is used -> /!\ This number of steps is gpu dependent (100 max steps on 8 gpus = 800 steps on 1 gpu)
-    use_val_from_train_src: bool = True # Use the validation set from training sources
+    max_steps: Optional[int] = (
+        None  # If None the whole validation file is used -> /!\ This number of steps is gpu dependent (100 max steps on 8 gpus = 800 steps on 1 gpu)
+    )
+    use_val_from_train_src: bool = True  # Use the validation set from training sources
     root_dir: str = ""
-    sources: List[str] = field(default_factory=list) # Other sources to eval on
+    sources: List[str] = field(default_factory=list)  # Other sources to eval on
+
 
 @dataclass
 class EvalArgs:
@@ -141,14 +147,14 @@ class EvalHarnessLM(LM):
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         prompts, continuations = zip(*[req.args for req in requests])
         inputs = [req.args[0] + req.args[1] for req in requests]
-        
+
         # Add input validation
         if not inputs:
             return []
-            
+
         # Ensure all inputs are strings
         inputs = [str(inp) for inp in inputs]
-        
+
         max_gen_len = self.generator.max_gen_len
         self.generator.max_gen_len = 1
         try:
@@ -157,15 +163,17 @@ class EvalHarnessLM(LM):
             logger.error(f"Error during generation: {e}")
             return [(0.0, False)] * len(inputs)
         results = []
-        
+
         for p, ll, gr, req in zip(prompts, lls, greedy, requests):
-            p_len = len(self.generator.tokenizer.encode(p, add_bos=False, add_eos=False))
+            p_len = len(
+                self.generator.tokenizer.encode(p, add_bos=False, add_eos=False)
+            )
             cont_ll = ll[p_len:].sum().item()
             cont_tokens = len(ll[p_len:])
-            
-            if self.compute_loss and hasattr(req, 'task_name'):
+
+            if self.compute_loss and hasattr(req, "task_name"):
                 self.losses[req.task_name].append(-cont_ll / cont_tokens)
-                
+
             results.append((cont_ll, gr[p_len:].all().item()))
 
         self.generator.max_gen_len = max_gen_len
@@ -183,7 +191,7 @@ class EvalHarnessLM(LM):
         self.generator.max_gen_len = max_gen_len
 
         return results
-    
+
 
 def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     srcs = {}
@@ -196,7 +204,9 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             path = os.path.join(train_cfg.data.root_dir, src)
             srcs[path] = 1.0
 
-    multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
+    multi_state = init_choice_state(
+        "", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl"
+    )
     path_to_iter = setup_sources(multi_state)
 
     original_max_len = generator.max_gen_len
@@ -217,7 +227,9 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
             # Make sure content is actually a dictionary.
             if not isinstance(content, dict):
-                logger.warning(f"Skipping non-dict content at step {step} in {src}: {content}")
+                logger.warning(
+                    f"Skipping non-dict content at step {step} in {src}: {content}"
+                )
                 continue
 
             # Fallback among possible text keys
@@ -245,6 +257,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             metrics["nll"].append(neg_ll)
             metrics["nll_per_token"].append(neg_ll / len(ll))
             metrics["nll_per_char"].append(neg_ll / len(txt))
+            metrics["bits_per_byte"].append(neg_ll / len(txt.encode("utf-8")))
             metrics["avg_seqlen"].append(len(ll))
 
         for m in metrics:
@@ -255,12 +268,15 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
         name = os.path.basename(src)
         if name in all_val_metrics:
-            logger.warning(f"Duplicate source name {name}, path {src}, renaming to {name}_1")
+            logger.warning(
+                f"Duplicate source name {name}, path {src}, renaming to {name}_1"
+            )
             name = f"{name}_1"
         all_val_metrics[name] = metrics
 
     generator.max_gen_len = original_max_len
     return all_val_metrics
+
 
 def launch_eval(cfg: EvalArgs):
     if not torch.distributed.is_initialized():
@@ -287,7 +303,7 @@ def launch_eval(cfg: EvalArgs):
         model_cls=LMTransformer,
         model_args_cls=LMTransformerArgs,
     )
-    
+
     # Add configuration validation
     if hasattr(model, "norm_type"):
         logger.info(f"Model normalization type: {model.norm_type}")
@@ -296,19 +312,19 @@ def launch_eval(cfg: EvalArgs):
             for module in model.modules():
                 if isinstance(module, nn.LayerNorm):
                     module.to(dtype=model.dtype)
-    
+
     model.eval()
     logger.info("Model loaded")
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)
     wrap.compute_loss = cfg.harness.compute_loss
-    
+
     harness_args = asdict(cfg.harness)
-    harness_args.pop('compute_loss', None)
-    
+    harness_args.pop("compute_loss", None)
+
     results = simple_evaluate(wrap, **harness_args)
-    
+
     if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
             for task_name, task_losses in wrap.losses.items():
@@ -317,11 +333,9 @@ def launch_eval(cfg: EvalArgs):
                 if task_name in results["results"]:
                     results["results"][task_name]["loss"] = loss_value
                 else:
-                    results["results"][task_name] = {
-                        "loss": loss_value
-                    }
+                    results["results"][task_name] = {"loss": loss_value}
 
-    val_results =  None
+    val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
     if get_global_rank() == 0:
@@ -354,7 +368,7 @@ def launch_eval(cfg: EvalArgs):
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )
-    
+
     del generator
 
 
