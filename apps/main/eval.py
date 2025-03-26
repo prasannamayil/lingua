@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -253,17 +254,19 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         _, loglikelihood, _ = generator.generate(texts)
         metrics = defaultdict(list)
         for txt, ll in zip(texts, loglikelihood):
-            # TODO: check if this is correct, division by ln(2) is definitely missing
-            # are we averaging correctly?
             neg_ll = -ll.sum().item()
             metrics["nll"].append(neg_ll)
             metrics["nll_per_token"].append(neg_ll / len(ll))
             metrics["nll_per_char"].append(neg_ll / len(txt))
-            metrics["bits_per_byte"].append(neg_ll / len(txt.encode("utf-8")))
+            metrics["avg_bytes"].append(len(txt.encode("utf-8")))
             metrics["avg_seqlen"].append(len(ll))
+
+        bits_per_byte = -sum(metrics["nll"]) / sum(metrics["avg_bytes"]) / math.log(2)
 
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
+
+        metrics["bits_per_byte"] = bits_per_byte
 
         metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
@@ -325,6 +328,7 @@ def launch_eval(cfg: EvalArgs):
     harness_args = asdict(cfg.harness)
     harness_args.pop("compute_loss", None)
 
+    breakpoint()
     results = simple_evaluate(wrap, **harness_args)
 
     if dist.get_rank() == 0 and results is not None:
