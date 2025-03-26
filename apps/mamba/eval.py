@@ -1,30 +1,30 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-import torch.distributed as dist
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
 import json
 import logging
 import os
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from lm_eval import simple_evaluate
-
-from omegaconf import OmegaConf
+import numpy as np
 import torch
+import torch.distributed as dist
+from lm_eval import simple_evaluate
+from omegaconf import OmegaConf
 
 from apps.main.eval import (
-    ValidationArgs,
     EvalHarnessLM,
     LMHarnessArgs,
+    ValidationArgs,
+    bits_per_byte,
     eval_on_val,
 )
+from apps.main.generate import load_consolidated_model_and_tokenizer
 from apps.mamba.generate import (
     PackedCausalMambaGenerator,
     PackedCausalMambaGeneratorArgs,
 )
-
-from apps.main.generate import load_consolidated_model_and_tokenizer
 from apps.mamba.mamba import LMMamba, LMMambaArgs
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
@@ -81,28 +81,24 @@ def launch_eval(cfg: EvalArgs):
 
     wrap = EvalHarnessLM(generator)
     wrap.compute_loss = cfg.harness.compute_loss
-    
+
     harness_args = asdict(cfg.harness)
-    harness_args.pop('compute_loss', None)
-    
+    harness_args.pop("compute_loss", None)
+
     results = simple_evaluate(wrap, **harness_args)
-    
+
     if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
-            for task_name, task_losses in wrap.losses.items():
-                loss_value = sum(task_losses) / len(task_losses)
-
-                if task_name in results["results"]:
-                    results["results"][task_name]["loss"] = loss_value
-                else:
-                    results["results"][task_name] = {
-                        "loss": loss_value
-                    }
+            for task_name in wrap.losses:
+                loss = np.mean(wrap.losses[task_name])
+                bpb = bits_per_byte(wrap.nlls[task_name], wrap.bytes[task_name])
+                task_results = results["results"].setdefault(task_name, {})
+                task_results["loss"] = loss
+                task_results["bits_per_byte"] = bpb
 
     val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
-
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             f.write(json.dumps(results))
@@ -114,8 +110,7 @@ def launch_eval(cfg: EvalArgs):
 
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
-
-        logger.info(f"Writing metric logs to {metric_log_path}")
+        logger.info(f"Writing eval metric logs to {metric_log_path}")
         timestamp = {
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -128,13 +123,14 @@ def launch_eval(cfg: EvalArgs):
         )
 
         val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
+        logger.info(f"Writing validation metric logs to {val_log_path}")
         if val_results is not None:
             print(
                 json.dumps(timestamp | val_results),
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )
-    
+
     del generator
 
 
