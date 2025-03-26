@@ -7,44 +7,22 @@ generator:
   dtype: bf16
   temperature: 1.0
 harness:
-  # verbosity: "DEBUG"
-  # compute_loss: true
+  compute_loss: true
   tasks:
-    - task: hellaswag
-      metric_list:
-        - metric: bits_per_byte
-          higher_is_better: false
-    - task: piqa
-      # metric_list:
-      #   - bits_per_byte
-    - task: winogrande
-      # metric_list:
-        # - bits_per_byte
-    - task: arc_easy
-      # metric_list:
-      #   - bits_per_byte
-    - task: arc_challenge
-      # metric_list:
-      #   - bits_per_byte
-    - task: commonsense_qa
-      # metric_list:
-      #   - bits_per_byte
+    - hellaswag
+    - piqa
+    - winogrande
+    - arc_easy
+    - arc_challenge
+    - commonsense_qa
     - task: copa
       dataset_kwargs:
         trust_remote_code: true
-      # metric_list:
-      #   - bits_per_byte
-    - task: winogrande
-      # metric_list:
-      #   - bits_per_byte
-    - task: mmlu
-      # metric_list:
-      #   - bits_per_byte
+    - winogrande
+    - mmlu
     - task: social_iqa
       dataset_kwargs:
         trust_remote_code: true
-      # metric_list:
-      #   - bits_per_byte
 validation:
   use_val_from_train_src: false
   max_steps: 5000

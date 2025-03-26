@@ -1,7 +1,7 @@
 name: "debug_evals"
-ckpt_dir:   # Will be set by eval script
-dump_dir:   # Will be set by eval script
-metric_log_dir: /fast/pmayilvahanan/lm_logs/lingua/mamba_420M_fw_edu_50BT/  # Will be set by eval script
+# ckpt_dir:   # Will be set by eval script
+# dump_dir:   # Will be set by eval script
+# metric_log_dir: /fast/pmayilvahanan/lm_logs/lingua/mamba_420M_fw_edu_50BT/  # Will be set by eval script
 generator:
   max_tokens: 16384
   dtype: bf16
@@ -18,7 +18,6 @@ harness:
     - task: copa
       dataset_kwargs:
         trust_remote_code: true
-    - winogrande
     - mmlu
     - task: social_iqa
       dataset_kwargs:
