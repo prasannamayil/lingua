@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from lm_eval import simple_evaluate
@@ -93,6 +94,10 @@ class EvalArgs:
     global_step: Optional[int] = None  # for in-training evaluation
 
 
+def bits_per_byte(nll: List[float], bytes: List[int]) -> float:
+    return sum(nll) / sum(bytes) / math.log(2)
+
+
 def all_dicts_same(dict_list):
     if not dict_list:  # Check if the list is empty
         return True
@@ -122,6 +127,8 @@ class EvalHarnessLM(LM):
         self._world_size = get_world_size()
         self.device = generator.device
         self.losses = defaultdict(list)
+        self.bytes = defaultdict(list)
+        self.nlls = defaultdict(list)
         self.compute_loss = False
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
@@ -173,7 +180,27 @@ class EvalHarnessLM(LM):
             cont_tokens = len(ll[p_len:])
 
             if self.compute_loss and hasattr(req, "task_name"):
-                self.losses[req.task_name].append(-cont_ll / cont_tokens)
+                task_name = req.task_name
+                if task_name.startswith("mmlu"):
+                    target_idx = int(req.doc["answer"])
+                elif task_name in ["piqa", "copa"]:
+                    target_idx = int(req.doc["label"])
+                elif task_name == "winogrande":
+                    target_idx = int(req.doc["answer"]) - 1
+                elif task_name == "hellaswag":
+                    target_idx = int(req.doc["gold"])
+                elif task_name == "social_iqa":
+                    target_idx = int(req.doc["label"]) - 1
+                else:  # arc_easy, arc_challenge, openbookqa, commonsense_qa
+                    # Find index of answer in choices
+                    labels = req.doc["choices"]["label"]
+                    answer_key = req.doc["answerKey"]
+                    target_idx = labels.index(answer_key)
+
+                if req.idx == target_idx:
+                    self.losses[req.task_name].append(-cont_ll / cont_tokens)
+                    self.bytes[req.task_name].append(len(req.args[1].encode("utf-8")))
+                    self.nlls[req.task_name].append(-cont_ll)
 
             results.append((cont_ll, gr[p_len:].all().item()))
 
@@ -261,12 +288,12 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             metrics["avg_bytes"].append(len(txt.encode("utf-8")))
             metrics["avg_seqlen"].append(len(ll))
 
-        bits_per_byte = -sum(metrics["nll"]) / sum(metrics["avg_bytes"]) / math.log(2)
+        bpb = bits_per_byte(metrics["nll"], metrics["avg_bytes"])
 
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
 
-        metrics["bits_per_byte"] = bits_per_byte
+        metrics["bits_per_byte"] = bpb
 
         metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
@@ -328,18 +355,16 @@ def launch_eval(cfg: EvalArgs):
     harness_args = asdict(cfg.harness)
     harness_args.pop("compute_loss", None)
 
-    breakpoint()
     results = simple_evaluate(wrap, **harness_args)
 
     if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
-            for task_name, task_losses in wrap.losses.items():
-                loss_value = sum(task_losses) / len(task_losses)
-
-                if task_name in results["results"]:
-                    results["results"][task_name]["loss"] = loss_value
-                else:
-                    results["results"][task_name] = {"loss": loss_value}
+            for task_name in wrap.losses:
+                loss = np.mean(wrap.losses[task_name])
+                bpb = bits_per_byte(wrap.nlls[task_name], wrap.bytes[task_name])
+                task_results = results["results"].setdefault(task_name, {})
+                task_results["loss"] = loss
+                task_results["bits_per_byte"] = bpb
 
     val_results = None
     if cfg.validation:
@@ -352,10 +377,10 @@ def launch_eval(cfg: EvalArgs):
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
             logger.info(f"All validation results: {val_results}")
+
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
-
-        logger.info(f"Writing metric logs to {metric_log_path}")
+        logger.info(f"Writing eval metric logs to {metric_log_path}")
         timestamp = {
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -368,6 +393,7 @@ def launch_eval(cfg: EvalArgs):
         )
 
         val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
+        logger.info(f"Writing validation metric logs to {val_log_path}")
         if val_results is not None:
             print(
                 json.dumps(timestamp | val_results),
