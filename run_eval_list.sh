@@ -5,7 +5,7 @@ DUMP_DIR=$4
 METRIC_LOG_DIR=$5
 
 for path in $(cat $PATH_LIST); do
-    step=$(basename $path)
+    step=$(( 10#$(basename $path) ))
     model_dir=$(dirname $(dirname $path))
     model=$(basename $model_dir)
 
