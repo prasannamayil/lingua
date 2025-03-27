@@ -9,6 +9,7 @@ for path in $(cat $PATH_LIST); do
     model_dir=$(dirname $(dirname $path))
     model=$(basename $model_dir)
 
-    bash run_eval.sh $NPROC $API_KEY ckpt_dir=$path dump_dir=$DUMP_DIR/$model metric_log_dir=$METRIC_LOG_DIR/$model global_step=$step
+    echo "Evaluating $model at step $step"
+    bash run_eval.sh $NPROC $API_KEY $model ckpt_dir=$path dump_dir=$DUMP_DIR/$model metric_log_dir=$METRIC_LOG_DIR/$model global_step=$step
 done
 
