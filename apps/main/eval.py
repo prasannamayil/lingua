@@ -94,8 +94,13 @@ class EvalArgs:
     global_step: Optional[int] = None  # for in-training evaluation
 
 
-def bits_per_byte(nll: List[float], bytes: List[int]) -> float:
-    return sum(nll) / sum(bytes) / math.log(2)
+def bits_per_byte(
+    nll: List[float], bytes: List[int], weighted_mean: bool = True
+) -> float:
+    if weighted_mean:
+        return sum(nll) / sum(bytes) / math.log(2)
+    else:
+        return np.mean(np.array(nll) / np.array(bytes)) / math.log(2)
 
 
 def all_dicts_same(dict_list):
@@ -288,13 +293,18 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             metrics["avg_bytes"].append(len(txt.encode("utf-8")))
             metrics["avg_seqlen"].append(len(ll))
 
-        bpb = bits_per_byte(metrics["nll"], metrics["avg_bytes"])
+        bpb_weighted = bits_per_byte(
+            metrics["nll"], metrics["avg_bytes"], weighted_mean=True
+        )
+        bpb_unweighted = bits_per_byte(
+            metrics["nll"], metrics["avg_bytes"], weighted_mean=False
+        )
 
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
 
-        metrics["bits_per_byte"] = bpb
-
+        metrics["bits_per_byte"] = bpb_weighted
+        metrics["bits_per_byte_unweighted"] = bpb_unweighted
         metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
 
@@ -308,6 +318,29 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
     generator.max_gen_len = original_max_len
     return all_val_metrics
+
+
+def aggregate_losses(wrapper, results):
+    """
+    Aggregate losses and bits per byte for each task.
+
+    Args:
+        wrapper: The model wrapper to aggregate losses from.
+        results: The results to aggregate losses to, modified in place.
+    """
+    for task_name in wrapper.losses:
+        loss = np.mean(wrapper.losses[task_name])
+        bpb_weighted = bits_per_byte(
+            wrapper.nlls[task_name], wrapper.bytes[task_name], weighted_mean=True
+        )
+        bpb_unweighted = bits_per_byte(
+            wrapper.nlls[task_name], wrapper.bytes[task_name], weighted_mean=False
+        )
+
+        task_results = results["results"].setdefault(task_name, {})
+        task_results["loss"] = loss
+        task_results["bits_per_byte"] = bpb_weighted
+        task_results["bits_per_byte_unweighted"] = bpb_unweighted
 
 
 def launch_eval(cfg: EvalArgs):
@@ -359,16 +392,12 @@ def launch_eval(cfg: EvalArgs):
 
     if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
-            for task_name in wrap.losses:
-                loss = np.mean(wrap.losses[task_name])
-                bpb = bits_per_byte(wrap.nlls[task_name], wrap.bytes[task_name])
-                task_results = results["results"].setdefault(task_name, {})
-                task_results["loss"] = loss
-                task_results["bits_per_byte"] = bpb
+            aggregate_losses(wrap, results)
 
     val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             f.write(json.dumps(results))

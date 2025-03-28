@@ -17,6 +17,7 @@ from apps.main.eval import (
     EvalHarnessLM,
     LMHarnessArgs,
     ValidationArgs,
+    aggregate_losses,
     bits_per_byte,
     eval_on_val,
 )
@@ -89,16 +90,12 @@ def launch_eval(cfg: EvalArgs):
 
     if dist.get_rank() == 0 and results is not None:
         if cfg.harness.compute_loss:
-            for task_name in wrap.losses:
-                loss = np.mean(wrap.losses[task_name])
-                bpb = bits_per_byte(wrap.nlls[task_name], wrap.bytes[task_name])
-                task_results = results["results"].setdefault(task_name, {})
-                task_results["loss"] = loss
-                task_results["bits_per_byte"] = bpb
+            aggregate_losses(wrap, results)
 
     val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             f.write(json.dumps(results))
