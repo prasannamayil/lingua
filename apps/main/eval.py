@@ -358,7 +358,9 @@ def launch_eval(cfg: EvalArgs):
             consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
 
     Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True, mode=0o777)
-    dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
+    config_path = Path(cfg.dump_dir) / "config.yaml"
+    dump_config(cfg, config_path, log_config=False)
+    config_path.chmod(0o666)
 
     consolidate_path = str(consolidate_path)
     torch.distributed.barrier()
