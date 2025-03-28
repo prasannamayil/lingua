@@ -357,7 +357,7 @@ def launch_eval(cfg: EvalArgs):
         if not consolidate_path.exists() and get_global_rank() == 0:
             consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
 
-    Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
+    Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True, mode=0o777)
     dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
 
     consolidate_path = str(consolidate_path)
@@ -399,16 +399,27 @@ def launch_eval(cfg: EvalArgs):
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
 
     if get_global_rank() == 0:
-        with open(Path(cfg.dump_dir) / "results.json", "w") as f:
-            f.write(json.dumps(results))
-        logger.info(f"All evaluation results: {results['results']}")
+        try:
+            path = Path(cfg.dump_dir) / "results.json"
+            with open(path, "w") as f:
+                f.write(json.dumps(results))
+            path.chmod(0o666)
+            logger.info(f"All evaluation results: {results['results']}")
+        except Exception as e:
+            logger.error(f"Error writing results.json: {e}")
         if val_results is not None:
-            with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
-                f.write(json.dumps(val_results))
-            logger.info(f"All validation results: {val_results}")
+            try:
+                path = Path(cfg.dump_dir) / "validation.json"
+                with open(path, "w") as f:
+                    f.write(json.dumps(val_results))
+                path.chmod(0o666)
+                logger.info(f"All validation results: {val_results}")
+            except Exception as e:
+                logger.error(f"Error writing validation.json: {e}")
 
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
+        metric_log_path.chmod(0o666)
         logger.info(f"Writing eval metric logs to {metric_log_path}")
         timestamp = {
             "created_at": datetime.utcnow().isoformat(),
@@ -422,6 +433,7 @@ def launch_eval(cfg: EvalArgs):
         )
 
         val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
+        val_log_path.chmod(0o666)
         logger.info(f"Writing validation metric logs to {val_log_path}")
         if val_results is not None:
             print(
