@@ -119,7 +119,6 @@ def launch_eval(cfg: EvalArgs):
 
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
-        metric_log_path.chmod(0o666)
         logger.info(f"Writing eval metric logs to {metric_log_path}")
         timestamp = {
             "created_at": datetime.utcnow().isoformat(),
@@ -131,9 +130,9 @@ def launch_eval(cfg: EvalArgs):
             file=open(metric_log_path, mode="a"),
             flush=True,
         )
+        metric_log_path.chmod(0o666)
 
         val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
-        val_log_path.chmod(0o666)
         logger.info(f"Writing validation metric logs to {val_log_path}")
         if val_results is not None:
             print(
@@ -141,6 +140,7 @@ def launch_eval(cfg: EvalArgs):
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )
+        val_log_path.chmod(0o666)
 
     del generator
 
