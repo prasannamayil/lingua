@@ -6,6 +6,7 @@ generator:
   max_tokens: 16384
   dtype: bf16
   temperature: 1.0
+  max_prompt_len: 2047
 harness:
   compute_loss: true
   tasks:
